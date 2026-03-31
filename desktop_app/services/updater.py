@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -26,8 +27,12 @@ class CheckUpdateWorker(QObject):
 
     def run(self):
         try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            
             req = urllib.request.Request(UPDATE_JSON_URL, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=5) as response:
+            with urllib.request.urlopen(req, context=ctx, timeout=5) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 
                 latest_ver = data.get("latest_version")
@@ -84,8 +89,12 @@ class DownloadUpdateWorker(QObject):
                 
             dest_path = temp_dir / filename
 
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
             req = urllib.request.Request(self.download_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, context=ctx, timeout=10) as response:
                 total_size = int(response.info().get("Content-Length", 0))
                 downloaded_size = 0
                 chunk_size = 8192
