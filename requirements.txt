@@ -1,0 +1,6 @@
+easyocr
+passporteye
+matplotlib
+opencv-python
+python-dateutil
+PySide6
