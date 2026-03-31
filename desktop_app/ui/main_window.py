@@ -37,6 +37,7 @@ from desktop_app.services.extraction_worker import (
     default_country_codes_path,
 )
 from desktop_app.services.history_store import HistoryStore, HistoryItem
+from desktop_app.services.updater import CheckUpdateWorker, DownloadUpdateWorker, UpdaterService
 from desktop_app.ui.preview import ImagePreview, UploadPreviewZone
 from desktop_app.ui.styles import get_stylesheet
 
@@ -59,8 +60,13 @@ class MainWindow(QMainWindow):
         self._thread: QThread | None = None
         self._worker: ExtractionWorker | None = None
         self._history = HistoryStore()
+        
+        self._update_check_thread: QThread | None = None
+        self._update_download_thread: QThread | None = None
+        self._downloaded_update_path: str | None = None
 
         self._build_ui()
+        self._check_for_updates()
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -88,10 +94,130 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
 
         nav_bar = self._build_nav_bar()
+        self.update_banner = self._build_update_banner()
         content = self._build_content()
+        
         layout.addWidget(nav_bar)
+        layout.addWidget(self.update_banner)
         layout.addWidget(content, 1)
         self.setCentralWidget(root)
+        
+    def _build_update_banner(self) -> QWidget:
+        banner = QFrame()
+        banner.setObjectName("update-banner")
+        banner.setStyleSheet("background-color: #3b82f6; color: white;")
+        banner.setFixedHeight(40)
+        banner.setVisible(False)
+        
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(16, 4, 16, 4)
+        
+        self.update_label = QLabel("Checking for updates...")
+        self.update_label.setStyleSheet("color: white; font-weight: bold;")
+        
+        self.update_progress = QProgressBar()
+        self.update_progress.setRange(0, 100)
+        self.update_progress.setFixedWidth(150)
+        self.update_progress.setVisible(False)
+        self.update_progress.setStyleSheet(
+            "QProgressBar { background-color: #1d4ed8; color: white; border: none; text-align: center; border-radius: 4px; } "
+            "QProgressBar::chunk { background-color: #60a5fa; border-radius: 4px; }"
+        )
+        
+        self.btn_update_action = QPushButton("Download Update")
+        self.btn_update_action.setStyleSheet("background-color: white; color: #3b82f6; font-weight: bold; border-radius: 4px; padding: 4px 12px;")
+        self.btn_update_action.setVisible(False)
+        self.btn_update_action.clicked.connect(self._on_update_action_clicked)
+        
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setStyleSheet("background: transparent; color: white; font-weight: bold; font-size: 16px; border: none;")
+        btn_close.clicked.connect(lambda: banner.setVisible(False))
+        
+        layout.addWidget(self.update_label)
+        layout.addStretch()
+        layout.addWidget(self.update_progress)
+        layout.addWidget(self.btn_update_action)
+        layout.addWidget(btn_close)
+        
+        return banner
+        
+    def _check_for_updates(self):
+        if self._update_check_thread and self._update_check_thread.isRunning():
+            return
+            
+        self._update_check_thread = QThread(self)
+        self._update_checker = CheckUpdateWorker(__version__)
+        self._update_checker.moveToThread(self._update_check_thread)
+        
+        self._update_check_thread.started.connect(self._update_checker.run)
+        self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.no_update.connect(lambda: None)  # Do nothing silently
+        self._update_checker.error.connect(lambda err: print(f"Update Check Error: {err}"))
+        
+        self._update_checker.update_available.connect(self._update_check_thread.quit)
+        self._update_checker.no_update.connect(self._update_check_thread.quit)
+        self._update_checker.error.connect(self._update_check_thread.quit)
+        self._update_check_thread.finished.connect(self._update_check_thread.deleteLater)
+        
+        self._update_check_thread.start()
+        
+    def _on_update_available(self, version: str, download_url: str, notes: str):
+        self._update_download_url = download_url
+        self.update_label.setText(f"A new update (v{version}) is available!")
+        self.btn_update_action.setText("Download")
+        self.btn_update_action.setVisible(True)
+        self.update_banner.setVisible(True)
+        
+    def _on_update_action_clicked(self):
+        if self.btn_update_action.text() == "Download":
+            self._start_update_download()
+        elif self.btn_update_action.text() == "Restart to Install":
+            self._install_and_restart()
+            
+    def _start_update_download(self):
+        if not hasattr(self, '_update_download_url') or not self._update_download_url:
+            return
+            
+        self.update_banner.setStyleSheet("background-color: #0f172a; color: white;")
+        self.update_label.setText("Downloading update...")
+        self.btn_update_action.setVisible(False)
+        self.update_progress.setValue(0)
+        self.update_progress.setVisible(True)
+        
+        self._update_download_thread = QThread(self)
+        self._update_downloader = DownloadUpdateWorker(self._update_download_url)
+        self._update_downloader.moveToThread(self._update_download_thread)
+        
+        self._update_download_thread.started.connect(self._update_downloader.run)
+        self._update_downloader.progress.connect(self.update_progress.setValue)
+        self._update_downloader.finished.connect(self._on_update_download_finished)
+        self._update_downloader.error.connect(self._on_update_download_error)
+        
+        self._update_downloader.finished.connect(self._update_download_thread.quit)
+        self._update_downloader.error.connect(self._update_download_thread.quit)
+        self._update_download_thread.finished.connect(self._update_download_thread.deleteLater)
+        
+        self._update_download_thread.start()
+        
+    def _on_update_download_finished(self, dest_path: str):
+        self._downloaded_update_path = dest_path
+        self.update_progress.setVisible(False)
+        self.update_banner.setStyleSheet("background-color: #10b981; color: white;")
+        self.update_label.setText("Update download complete.")
+        self.btn_update_action.setText("Restart to Install")
+        self.btn_update_action.setVisible(True)
+        
+    def _on_update_download_error(self, err: str):
+        self.update_progress.setVisible(False)
+        self.update_banner.setStyleSheet("background-color: #ef4444; color: white;")
+        self.update_label.setText(f"Update failed: {err}")
+        self.btn_update_action.setVisible(False)
+        
+    def _install_and_restart(self):
+        if self._downloaded_update_path:
+            UpdaterService.install_and_restart(self._downloaded_update_path)
+            QApplication.quit()
 
     def _apply_theme(self) -> None:
         """Apply theme stylesheet (light, dark, or system)."""
@@ -115,7 +241,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
         layout.setAlignment(Qt.AlignVCenter)
 
-        title = QLabel(f"Passport Verifier v{__version__}")
+        title = QLabel(f"v{__version__}")
         title.setObjectName("sidebar-title")
         layout.addWidget(title, 0, Qt.AlignVCenter)
 
