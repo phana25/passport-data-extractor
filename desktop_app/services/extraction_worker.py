@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sys
 
 from PySide6.QtCore import QObject, Signal
 
@@ -80,7 +81,26 @@ class ExtractionWorker(QObject):
 
 
 def default_country_codes_path() -> str:
-    # Prefer repo-local path if present, else fallback to CWD-relative.
-    p = Path("data") / "country_codes.json"
-    return str(p)
+    # 1) PyInstaller one-file temp extraction dir
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        p = Path(meipass) / "data" / "country_codes.json"
+        if p.exists():
+            return str(p)
+
+    # 2) Next to executable (PyInstaller one-folder)
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        p = exe_dir / "data" / "country_codes.json"
+        if p.exists():
+            return str(p)
+
+    # 3) Project root when running from source
+    project_root = Path(__file__).resolve().parents[2]
+    p = project_root / "data" / "country_codes.json"
+    if p.exists():
+        return str(p)
+
+    # 4) Last-resort fallback (original behavior)
+    return str(Path("data") / "country_codes.json")
 

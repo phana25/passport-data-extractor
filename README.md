@@ -45,6 +45,27 @@ This repo also includes a desktop UI under `desktop_app/`.
 python -m desktop_app.main
 ```
 
+### Build Windows installer (auto installs VC++ runtime)
+
+1. Build app first:
+
+```powershell
+pyinstaller --noconfirm "Passport-Data-Extractor.spec"
+```
+
+2. Download `vc_redist.x64.exe` from Microsoft and place it at:
+`third_party/vc_redist.x64.exe`
+
+3. Install Inno Setup 6.
+
+4. Build installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
+```
+
+Installer output will be created in `installer_output/`.
+
 ### What the UI supports (v1)
 
 - Load **passport image** + **employment card image**

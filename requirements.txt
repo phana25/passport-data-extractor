@@ -4,3 +4,4 @@ matplotlib
 opencv-python
 python-dateutil
 PySide6
+certifi

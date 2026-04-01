@@ -166,3 +166,7 @@ images/
 *.tiff
 *.bmp
 *.gif
+
+# Installer output and machine-local Tesseract bundle (regenerate with bundle_tesseract.ps1)
+installer_output/
+vendor/

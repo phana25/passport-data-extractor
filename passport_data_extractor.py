@@ -1,5 +1,8 @@
 import os
 import string as st
+import ssl
+import shutil
+import sys
 from dateutil import parser
 import matplotlib.image as mpimg
 import cv2
@@ -12,14 +15,78 @@ import openpyxl
 import warnings
 import tempfile
 import re
+import certifi
 
 warnings.filterwarnings('ignore')
 
+
+def _configure_ssl_certificates():
+    """
+    Ensure HTTPS downloads (e.g. EasyOCR model files) use a trusted CA bundle.
+    This is especially important on some Windows Python/venv setups.
+    """
+    cafile = certifi.where()
+    os.environ.setdefault("SSL_CERT_FILE", cafile)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", cafile)
+    ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=cafile)
+
 class PassportDataExtractor:
     def __init__(self, country_codes_file, gpu=True):
+        _configure_ssl_certificates()
+        self._tesseract_available = self._configure_tesseract()
         self.reader = easyocr.Reader(lang_list=['en'], gpu=gpu)
         with open(country_codes_file) as f:
             self.country_codes = json.load(f)
+
+    def _configure_tesseract(self):
+        """
+        Try to locate Tesseract executable.
+        Returns True when available; False otherwise.
+        """
+        # Respect explicit config if already provided.
+        configured = getattr(pytesseract.pytesseract, "tesseract_cmd", "") or ""
+        if configured and os.path.exists(configured):
+            return True
+
+        # Try PATH first.
+        exe = shutil.which("tesseract")
+        if exe:
+            pytesseract.pytesseract.tesseract_cmd = exe
+            return True
+
+        # Prefer bundled binary (PyInstaller one-folder or one-file temp extraction).
+        bundled_candidates = []
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(sys.executable)
+            bundled_candidates.append(os.path.join(exe_dir, "tesseract", "tesseract.exe"))
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass:
+                bundled_candidates.append(os.path.join(meipass, "tesseract", "tesseract.exe"))
+
+        # Also support running from source with repo-local vendor directory.
+        here = os.path.dirname(os.path.abspath(__file__))
+        bundled_candidates.append(os.path.join(here, "vendor", "tesseract", "tesseract.exe"))
+
+        for candidate in bundled_candidates:
+            if os.path.exists(candidate):
+                pytesseract.pytesseract.tesseract_cmd = candidate
+                # Make sure tesseract can find traineddata.
+                tessdata_dir = os.path.join(os.path.dirname(candidate), "tessdata")
+                if os.path.isdir(tessdata_dir):
+                    os.environ.setdefault("TESSDATA_PREFIX", tessdata_dir)
+                return True
+
+        # Common Windows install locations.
+        candidates = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                pytesseract.pytesseract.tesseract_cmd = candidate
+                return True
+
+        return False
 
     # Common OCR misreads of month abbreviations
     _MONTH_FIXES = {
@@ -62,10 +129,16 @@ class PassportDataExtractor:
 
     def _tesseract_lines(self, img):
         """Run Tesseract on a cv2 image and return non-empty lines."""
+        if not self._tesseract_available:
+            return []
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (3, 3), 0)
         _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        text = pytesseract.image_to_string(thresh, config='--psm 6 --oem 3')
+        try:
+            text = pytesseract.image_to_string(thresh, config='--psm 6 --oem 3')
+        except pytesseract.pytesseract.TesseractNotFoundError:
+            self._tesseract_available = False
+            return []
         lines = [self._fix_month_typos(l.strip()) for l in text.splitlines() if l.strip()]
         return lines
 
@@ -361,7 +434,12 @@ class PassportDataExtractor:
         if engine == 'easyocr':
             return self._easyocr_lines(img)
         elif engine == 'tesseract':
+            if not self._tesseract_available:
+                # Graceful fallback when Tesseract is missing.
+                return self._easyocr_lines(img)
             return self._tesseract_lines(img)
+        if engine == 'both' and not self._tesseract_available:
+            return self._easyocr_lines(img)
         return self._dual_ocr_lines(img)
 
     def get_data(self, img_name, debug=False, ocr_engine='both'):
@@ -370,7 +448,13 @@ class PassportDataExtractor:
             tmpfile_path = tmpfile.name
 
         try:
-            mrz = read_mrz(img_name, save_roi=True)
+            try:
+                mrz = read_mrz(img_name, save_roi=True)
+            except (pytesseract.pytesseract.TesseractNotFoundError, FileNotFoundError, OSError):
+                # passporteye can invoke Tesseract internally for MRZ extraction.
+                # If unavailable, continue without MRZ instead of crashing.
+                mrz = None
+                self._tesseract_available = False
             if mrz:
                 mpimg.imsave(tmpfile_path, mrz.aux['roi'], cmap='gray')
                 img = cv2.imread(tmpfile_path)
@@ -462,7 +546,7 @@ class PassportDataExtractor:
 
 
             else:
-                print(f'Machine cannot read image {img_name}.')
+                print(f'Machine cannot read MRZ from image {img_name}.')
 
         finally:
             if os.path.exists(tmpfile_path):
