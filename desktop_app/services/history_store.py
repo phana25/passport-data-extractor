@@ -104,15 +104,34 @@ class HistoryStore:
             encoding="utf-8",
         )
         
-    def mark_all_exported(self) -> None:
-        items = self.load()
+    def mark_items_exported(self, items_to_mark: list[HistoryItem]) -> str | None:
+        """Mark a specific subset of items as exported with the current timestamp."""
+        all_items = self.load()
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for i in items:
-            if not getattr(i, "exported", False):
-                i.exported = True
-                i.export_date = now
-        self._save(items)
+        
+        # Match items by their timestamp ISO string
+        target_ts = {it.ts_iso for it in items_to_mark}
+        
+        changed = False
+        final_date = None
+        for i in all_items:
+            if i.ts_iso in target_ts:
+                if not i.exported:
+                    i.exported = True
+                    i.export_date = now
+                    changed = True
+                final_date = i.export_date
+        
+        if changed:
+            self._save(all_items)
+        
+        # If we just moved items from NEW, return 'now'. If we re-exported an old tab, return its date.
+        return final_date if final_date else (now if changed else None)
+
+    def mark_all_exported(self) -> None:
+        items = self.load()
+        self.mark_items_exported(items)
 
     def clear_batch(self, exported: bool, export_date: str | None = None) -> None:
         """Clear only items matching the exported status and optional date."""

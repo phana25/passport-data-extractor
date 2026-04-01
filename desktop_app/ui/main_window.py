@@ -487,9 +487,9 @@ class MainWindow(QMainWindow):
         btn_refresh = QPushButton("Refresh")
         btn_refresh.setStyleSheet("background: #e2e8f0; color: #475569;")
         btn_refresh.clicked.connect(self._refresh_history)
-        btn_export_all = QPushButton("Export All to Excel")
+        btn_export_all = QPushButton("Export Current Tab")
         btn_export_all.setStyleSheet("background: #10b981; color: white;")
-        btn_export_all.clicked.connect(self._export_all_history)
+        btn_export_all.clicked.connect(self._export_current_tab)
         btn_clear = QPushButton("Clear Data List")
         btn_clear.setStyleSheet("background: #fee2e2; color: #dc2626;")
         btn_clear.clicked.connect(self._clear_history)
@@ -524,16 +524,23 @@ class MainWindow(QMainWindow):
         if idx == 1:
             self._refresh_history()
 
-    def _refresh_history(self) -> None:
+    def _refresh_history(self, target_export_date: str | None = None) -> None:
         if not hasattr(self, "history_tabs"):
             return
 
+        # Save current tab selection by title
+        current_idx = self.history_tabs.currentIndex()
+        current_title_base = self.history_tabs.tabText(current_idx) if current_idx >= 0 else None
+
         items = self._history.load()
         
+        # Disabling signals to prevent recursive calls during rebuild
+        self.history_tabs.blockSignals(True)
         while self.history_tabs.count() > 0:
             self.history_tabs.removeTab(0)
             
         if not items:
+            self.history_tabs.blockSignals(False)
             return
 
         from PySide6.QtGui import QColor
@@ -620,16 +627,36 @@ class MainWindow(QMainWindow):
         
         for key in sorted_keys:
             page = create_tab_content_for_group(groups[key], True)
-            title = key.replace("Exported: ", "")
-            title = f"{title} ({len(groups[key])})"
-            self.history_tabs.addTab(page, title)
+            title_base = key.replace("Exported: ", "")
+            self.history_tabs.addTab(page, title_base)
             
         if "NEW" in groups:
             page = create_tab_content_for_group(groups["NEW"], False)
-            title = f"New Data (Ready) ({len(groups['NEW'])})"
-            self.history_tabs.addTab(page, title)
-            # Auto-select the NEW tab if it exists
-            self.history_tabs.setCurrentIndex(self.history_tabs.count() - 1)
+            title_base = "New Data (Ready)"
+            self.history_tabs.addTab(page, title_base)
+            
+        # Restore selection
+        target_idx = -1
+        if target_export_date:
+            for i in range(self.history_tabs.count()):
+                if self.history_tabs.tabText(i) == target_export_date:
+                    target_idx = i
+                    break
+                    
+        if target_idx == -1 and current_title_base:
+            for i in range(self.history_tabs.count()):
+                if self.history_tabs.tabText(i) == current_title_base:
+                    target_idx = i
+                    break
+        
+        if target_idx == -1 and self.history_tabs.count() > 0:
+            # Fallback to NEW if no specific match
+            target_idx = self.history_tabs.count() - 1
+            
+        if target_idx >= 0:
+            self.history_tabs.setCurrentIndex(target_idx)
+
+        self.history_tabs.blockSignals(False)
 
     def _build_history_card(self, item: HistoryItem) -> QFrame:
         card = QFrame()
@@ -884,25 +911,51 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Data saved to list. You can proceed with the next document.")
         QMessageBox.information(self, "Saved", "Data saved to list.")
 
-    def _export_all_history(self) -> None:
+    def _export_current_tab(self) -> None:
         items = self._history.load()
         if not items:
             QMessageBox.warning(self, "Export", "No data to export.")
             return
+
+        idx = self.history_tabs.currentIndex()
+        if idx < 0:
+            return
             
+        tab_text = self.history_tabs.tabText(idx)
+        is_new = "New Data" in tab_text
+        
+        # Extract date from title like "2024-03-24 10:00:00 (5)"
+        import re
+        match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', tab_text)
+        target_date = match.group(1) if match else None
+
+        filtered_items = []
+        for it in items:
+            if is_new:
+                if not getattr(it, "exported", False):
+                    filtered_items.append(it)
+            else:
+                if getattr(it, "exported", False) and it.export_date == target_date:
+                    filtered_items.append(it)
+
+        if not filtered_items:
+            QMessageBox.warning(self, "Export", "No data to export in the current tab.")
+            return
+
         data_list = []
         is_exported_list = []
-        for it in reversed(items):
+        # We process them in order they appear in history (newest first usually)
+        for it in filtered_items:
             if it.combined:
                 data_list.append(it.combined)
-                is_exported_list.append(getattr(it, "exported", False))
+                is_exported_list.append(it.exported)
                 
         if not data_list:
-            QMessageBox.warning(self, "Export", "No data to export.")
+            QMessageBox.warning(self, "Export", "No complete records to export in the current tab.")
             return
             
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export All to Excel", "PASSPORT-FORM.xlsx", "Excel (*.xlsx)"
+            self, "Export Current Tab", "PASSPORT-FORM.xlsx", "Excel (*.xlsx)"
         )
         if not path:
             return
@@ -918,10 +971,11 @@ class MainWindow(QMainWindow):
                 is_exported_list=is_exported_list
             )
             
-            self._history.mark_all_exported()
-            self._refresh_history()
+            # Capture the export date to automatically follow it in the UI
+            exp_date = self._history.mark_items_exported(filtered_items)
+            self._refresh_history(target_export_date=exp_date)
             
-            QMessageBox.information(self, "Export complete", f"Saved {len(data_list)} records to: {path}")
+            QMessageBox.information(self, "Export complete", f"Saved {len(data_list)} records from the current tab to: {path}")
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
 
