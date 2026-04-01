@@ -14,7 +14,10 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 # Real URL pointing to your repository's version.json file on the main branch
 # Format expected: {"latest_version": "1.1.0", "windows_url": "...", "mac_url": "...", "release_notes": "..."}
+# GitHub raw URL for the main branch
 UPDATE_JSON_URL = "https://raw.githubusercontent.com/phana25/passport-data-extractor/main/version.json"
+# Backup URL (e.g., a Public Gist) to use if the main repository is set to private
+FALLBACK_UPDATE_URL = "https://gist.githubusercontent.com/phana25/14514d5de8ded8943899638598638b93/raw/version.json" 
 
 class CheckUpdateWorker(QObject):
     update_available = Signal(str, str, str)  # version, download_url, release_notes
@@ -25,43 +28,56 @@ class CheckUpdateWorker(QObject):
         super().__init__()
         self.current_version = current_version
 
-    def run(self):
+    def _fetch_data(self, url: str) -> dict | None:
+        """Helper to fetch and parse JSON from a URL."""
+        if not url:
+            return None
         try:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             
-            req = urllib.request.Request(UPDATE_JSON_URL, headers={'User-Agent': 'Mozilla/5.0'})
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, context=ctx, timeout=5) as response:
-                data = json.loads(response.read().decode('utf-8'))
-                
-                latest_ver = data.get("latest_version")
-                if not latest_ver:
-                    self.error.emit("Invalid update format")
-                    return
+                return json.loads(response.read().decode('utf-8'))
+        except Exception:
+            return None
 
-                if parse_version(latest_ver) > parse_version(self.current_version):
-                    # Determine appropriate OS url
-                    if sys.platform == "win32":
-                        download_url = data.get("windows_url")
-                    else:
-                        download_url = data.get("mac_url")
-                        
-                    if not download_url:
-                        # Fallback to a generic zip if no OS specific url exists
-                        download_url = data.get("download_url")
-                        
-                    if download_url:
-                        self.update_available.emit(latest_ver, download_url, data.get("release_notes", ""))
-                    else:
-                        self.error.emit("No compatible download found for this OS")
+    def run(self):
+        # 1. Try primary URL
+        data = self._fetch_data(UPDATE_JSON_URL)
+        
+        # 2. Try fallback if primary fails
+        if data is None and FALLBACK_UPDATE_URL:
+            data = self._fetch_data(FALLBACK_UPDATE_URL)
+            
+        if data is None:
+            self.error.emit("Update check failed: Unable to reach any update server.")
+            return
+
+        try:
+            latest_ver = data.get("latest_version")
+            if not latest_ver:
+                self.error.emit("Invalid update format in version.json")
+                return
+
+            if parse_version(latest_ver) > parse_version(self.current_version):
+                # Determine appropriate OS url
+                if sys.platform == "win32":
+                    download_url = data.get("windows_url") or data.get("download_url")
                 else:
-                    self.no_update.emit()
+                    download_url = data.get("mac_url") or data.get("download_url")
                     
-        except urllib.error.URLError as e:
-            self.error.emit(f"Network error checking for updates: {e}")
+                if download_url:
+                    self.update_available.emit(latest_ver, download_url, data.get("release_notes", ""))
+                else:
+                    self.error.emit("No compatible download found for this OS")
+            else:
+                self.no_update.emit()
+                    
         except Exception as e:
-            self.error.emit(f"Check update error: {e}")
+            self.error.emit(f"Check update processing error: {e}")
+
 
 
 class DownloadUpdateWorker(QObject):
@@ -145,12 +161,13 @@ class UpdaterService:
 
         if sys.platform == "win32":
             script_path = temp_dir / "update.bat"
-            # Simple batch script to wait, overwrite, and restart
-            # Assuming downloaded_file is a standalone .exe
+            # Inno Setup flags for silent background update:
+            # /SILENT /VERYSILENT: Install without showing wizard
+            # /SUPPRESSMSGBOXES: Don't show any error/info messages
+            # Note: the installer will auto-close the app and restart it based on AppId.
             bat_content = f"""@echo off
 timeout /t 2 /nobreak > NUL
-move /Y "{downloaded_file}" "{current_executable}"
-start "" "{current_executable}"
+start "" "{downloaded_file}" /SILENT /VERYSILENT /SUPPRESSMSGBOXES
 del "%~f0"
 """
             with open(script_path, "w") as f:
@@ -160,6 +177,7 @@ del "%~f0"
                 [str(script_path)],
                 creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NO_WINDOW
             )
+
             
         else:
             # macOS / Linux bash script

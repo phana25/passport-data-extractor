@@ -20,8 +20,9 @@ if vendor_tesseract.exists():
             datas.append((str(src), str(dest)))
 
 
+import os
 a = Analysis(
-    ['desktop_app\\main.py'],
+    [os.path.join('desktop_app', 'main.py')],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -60,4 +61,11 @@ coll = COLLECT(
     upx=True,
     upx_exclude=[],
     name='Passport-Data-Extractor',
+)
+
+app = BUNDLE(
+    coll,
+    name='PassportVerifier.app',
+    icon=None,
+    bundle_identifier='com.phana.passport-extractor',
 )
