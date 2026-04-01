@@ -31,6 +31,8 @@ MANIFEST
 #  before PyInstaller builds the exe, so may be deleted later.
 *.manifest
 *.spec
+!Passport-Data-Extractor.spec
+!PassportVerifier.spec
 
 # Installer logs
 pip-log.txt
