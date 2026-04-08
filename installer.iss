@@ -1,8 +1,13 @@
 #define AppName "Passport Data Extractor"
-#define AppVersion "1.0.0"
+#ifndef AppVersion
+  #define AppVersion "0.0.0"
+#endif
 #define AppExeName "Passport-Data-Extractor.exe"
 #define DistDir "dist\\Passport-Data-Extractor"
 #define VcRedistPath "third_party\\vc_redist.x64.exe"
+#ifndef OutputBaseFilename
+  #define OutputBaseFilename "Passport-Data-Extractor-Setup"
+#endif
 
 [Setup]
 AppId={{7AF09956-C2DB-4578-96F4-B1242A78E8E0}
@@ -11,7 +16,7 @@ AppVersion={#AppVersion}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir=installer_output
-OutputBaseFilename=Passport-Data-Extractor-Setup
+OutputBaseFilename={#OutputBaseFilename}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern

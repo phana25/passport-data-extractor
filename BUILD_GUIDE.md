@@ -31,7 +31,7 @@ Windows builds use **PyInstaller** to create the application files and **Inno Se
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
    ```
-3. **Output**: Your installer (`Passport-Data-Extractor-Setup.exe`) will be in the `installer_output/` folder.
+3. **Output**: Your installer (`Passport-Data-Extractor-Setup-v1.0.1.exe`) will be in the `installer_output/` folder (the version is read automatically from `desktop_app/__init__.py`).
 
 ---
 
@@ -67,14 +67,14 @@ Once you have your Windows `.exe` and macOS `.zip` files ready, follow these exa
 3. Click **Choose a tag** and type `v1.0.1` (this must match the version in your code).
 4. For the **Release title**, use `v1.0.1 - Improved Export and UI`.
 5. Under the "Attach binaries" area, drag and drop:
-   - `Passport-Data-Extractor-Setup.exe` (Windows)
+   - `Passport-Data-Extractor-Setup-v1.0.1.exe` (Windows)
    - `PassportVerifier_v1.0.1_mac.zip` (macOS)
 6. Click **Publish release**.
 
 ### 2. Get the Direct Download Links
 1. After publishing, you will see your files listed under the **Assets** section of the release.
 2. **Right-click** on each file and select **Copy Link Address**.
-   - Example Windows Link: `https://github.com/phana25/passport-data-extractor/releases/download/v1.0.1/Passport-Data-Extractor-Setup.exe`
+   - Example Windows Link: `https://github.com/phana25/passport-data-extractor/releases/download/v1.0.1/Passport-Data-Extractor-Setup-v1.0.1.exe`
    - Example macOS Link: `https://github.com/phana25/passport-data-extractor/releases/download/v1.0.1/PassportVerifier_v1.0.1_mac.zip`
 
 ### 3. Update the Version Gist

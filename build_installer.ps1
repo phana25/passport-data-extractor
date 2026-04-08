@@ -28,5 +28,20 @@ if (-not $iscc) {
     throw "Inno Setup not found. Install Inno Setup 6 first."
 }
 
-& $iscc (Join-Path $PSScriptRoot "installer.iss")
-Write-Host "Installer created in installer_output\"
+$initFile = Join-Path $PSScriptRoot "desktop_app\__init__.py"
+if (-not (Test-Path $initFile)) {
+    throw "Missing $initFile"
+}
+
+$initContent = Get-Content $initFile -Raw
+$versionMatch = [regex]::Match($initContent, '__version__\s*=\s*"(?<version>[^"]+)"')
+if (-not $versionMatch.Success) {
+    throw "Could not read __version__ from $initFile"
+}
+
+$appVersion = $versionMatch.Groups["version"].Value
+$outputBaseFilename = "Passport-Data-Extractor-Setup-v$appVersion"
+$installerScript = Join-Path $PSScriptRoot "installer.iss"
+
+& $iscc "/DAppVersion=$appVersion" "/DOutputBaseFilename=$outputBaseFilename" $installerScript
+Write-Host "Installer created in installer_output\$outputBaseFilename.exe"
