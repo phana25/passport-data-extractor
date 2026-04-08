@@ -778,21 +778,29 @@ class MainWindow(QMainWindow):
                 "Please upload at least one image (passport or employee card).",
             )
             return
-        self.progress.setValue(0)
-        self.progress.setVisible(True)
-        self.status_label.setText("Verifying…")
-        self.btn_verify.setEnabled(False)
-        self.btn_save_excel.setEnabled(False)
+        try:
+            self.progress.setValue(0)
+            self.progress.setVisible(True)
+            self.status_label.setText("Verifying…")
+            self.btn_verify.setEnabled(False)
+            self.btn_save_excel.setEnabled(False)
 
-        # Clear fields before starting a new scan to prevent stale data display
-        for w in list(self.passport_out.values()) + list(self.card_out.values()) + list(self.other_out.values()):
-            w.clear()
-        
-        # Get potentially rotated paths
-        passport = self.passport_preview.get_current_path() or ""
-        card = self.card_preview.get_current_path() or ""
-        
-        self._start_worker(passport, card, "both")
+            # Clear fields before starting a new scan to prevent stale data display
+            for w in list(self.passport_out.values()) + list(self.card_out.values()) + list(self.other_out.values()):
+                w.clear()
+            
+            # Get potentially rotated paths from the previews
+            passport = self.passport_preview.get_current_path() or ""
+            card = self.card_preview.get_current_path() or ""
+            
+            self._start_worker(passport, card, "both")
+        except Exception as e:  # noqa: BLE001
+            # If anything goes wrong during setup, make sure the UI is not left stuck
+            self.progress.setVisible(False)
+            self.status_label.setText("Verification failed.")
+            self.btn_verify.setEnabled(True)
+            self.btn_save_excel.setEnabled(False)
+            QMessageBox.critical(self, "Verification failed", str(e))
 
 
     def _clear(self) -> None:
@@ -847,6 +855,8 @@ class MainWindow(QMainWindow):
     def _on_scan_finished(self, result_obj: object) -> None:
         result: ScanResult = result_obj
         self._last_result = result
+        self._thread = None
+        self._worker = None
         import datetime
         today = datetime.date.today()
         extra_dates = {
@@ -866,6 +876,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Verification complete. Review and click 'Save Data to List'.")
 
     def _on_scan_failed(self, message: str) -> None:
+        self._thread = None
+        self._worker = None
         self.btn_verify.setEnabled(True)
         self.btn_save_excel.setEnabled(False)
         self.progress.setVisible(False)
