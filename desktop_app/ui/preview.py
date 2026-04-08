@@ -1,10 +1,9 @@
-from __future__ import annotations
-
+import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Callable
-
 from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -35,12 +34,16 @@ class ImagePreview(QFrame):
 
         self._pixmap: QPixmap | None = None
         self._path: str | None = None
+        self._rotation: int = 0
         self._boxes: list[OverlayBox] = []
+        self._temp_path: str | None = None
 
     def set_image(self, path: str) -> None:
         pm = QPixmap(path)
         self._path = path
         self._pixmap = pm if not pm.isNull() else None
+        self._rotation = 0
+        self._clear_temp()
         self._boxes = []
         self.setCursor(Qt.PointingHandCursor if self._pixmap else Qt.ArrowCursor)
         self.update()
@@ -48,9 +51,49 @@ class ImagePreview(QFrame):
     def clear(self) -> None:
         self._path = None
         self._pixmap = None
+        self._rotation = 0
+        self._clear_temp()
         self._boxes = []
         self.setCursor(Qt.ArrowCursor)
         self.update()
+
+    def rotate_clockwise(self) -> None:
+        if not self._pixmap:
+            return
+        self._rotation = (self._rotation + 90) % 360
+        self._clear_temp()
+        self.update()
+
+    def _clear_temp(self) -> None:
+        if self._temp_path and os.path.exists(self._temp_path):
+            try:
+                os.remove(self._temp_path)
+            except Exception:
+                pass
+        self._temp_path = None
+
+    def get_processed_path(self) -> str | None:
+        """Return the path to the current image (rotated if necessary)."""
+        if not self._pixmap or not self._path:
+            return None
+        
+        if self._rotation == 0:
+            return self._path
+        
+        if self._temp_path and os.path.exists(self._temp_path):
+            return self._temp_path
+
+        # Generate temp rotated file
+        transform = QTransform().rotate(self._rotation)
+        rotated = self._pixmap.transformed(transform, Qt.SmoothTransformation)
+        
+        fd, path = tempfile.mkstemp(suffix=".jpg", prefix="rotated_")
+        os.close(fd)
+        if rotated.save(path, "JPG", 95):
+            self._temp_path = path
+            return path
+        return self._path
+
 
     def set_overlay_boxes(self, boxes: list[OverlayBox]) -> None:
         self._boxes = boxes
@@ -68,8 +111,19 @@ class ImagePreview(QFrame):
                 return
 
             target = self._fit_rect(self._pixmap.width(), self._pixmap.height())
-            # Use signature: drawPixmap(targetRect, pixmap, sourceRect)
-            p.drawPixmap(target, self._pixmap, QRectF(self._pixmap.rect()))
+            
+            p.save()
+            # Rotate around center of target rect
+            p.translate(target.center())
+            p.rotate(self._rotation)
+            
+            # When rotated +/- 90, the painter coord system is rotated.
+            # We need to flip width/height for source drawing if we want to be precise,
+            # but simpler is to draw the pixmap scaled into the (possibly flipped) rect.
+            # Actually, the simplest is to draw the pixmap centered.
+            pm_rect = self._pixmap.rect()
+            p.drawPixmap(-target.width() / 2, -target.height() / 2, target.width(), target.height(), self._pixmap)
+            p.restore()
 
             if not self._boxes:
                 return
@@ -104,13 +158,16 @@ class ImagePreview(QFrame):
             p.end()
 
     def _fit_rect(self, img_w: int, img_h: int):
-        # Scale to fill width of box, use full width
+        # Swap w/h if rotated 90/270
+        if self._rotation in (90, 270):
+            img_w, img_h = img_h, img_w
+
         w = max(1, self.width() - 8)
         h = max(1, self.height() - 8)
         if img_w <= 0 or img_h <= 0:
             return self.rect()
-        scale = w / img_w  # prioritize width to fill box
-        scale = min(scale, h / img_h)  # cap by height so it fits
+            
+        scale = min(w / img_w, h / img_h)
         tw = int(img_w * scale)
         th = int(img_h * scale)
         x = (self.width() - tw) // 2
@@ -244,6 +301,13 @@ class UploadPreviewZone(QFrame):
             "QPushButton:hover { background: #2563eb; }"
         )
         reupload_btn.clicked.connect(on_browse)
+
+        rotate_btn = QPushButton("⟳ Rotate")
+        rotate_btn.setStyleSheet(
+            "QPushButton { background: #10b981; color: white; padding: 6px 14px; border-radius: 6px; font-size: 12px; } "
+            "QPushButton:hover { background: #059669; }"
+        )
+        rotate_btn.clicked.connect(self._preview.rotate_clockwise)
         
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setStyleSheet(
@@ -253,6 +317,7 @@ class UploadPreviewZone(QFrame):
         cancel_btn.clicked.connect(self._do_clear)
         
         btn_col.addWidget(reupload_btn)
+        btn_col.addWidget(rotate_btn)
         btn_col.addWidget(cancel_btn)
         
         loaded_layout.addLayout(btn_col, 0, 0, Qt.AlignLeft | Qt.AlignBottom)
@@ -268,6 +333,9 @@ class UploadPreviewZone(QFrame):
     def clear(self) -> None:
         self._preview.clear()
         self._stack.setCurrentIndex(0)
+
+    def get_current_path(self) -> str | None:
+        return self._preview.get_processed_path()
 
     def _do_clear(self) -> None:
         self.clear()

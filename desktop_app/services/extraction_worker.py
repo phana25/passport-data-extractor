@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+import pytesseract
 
 from PySide6.QtCore import QObject, Signal
 
@@ -21,6 +22,7 @@ class ExtractionWorker(QObject):
     status = Signal(str)
     finished = Signal(object)  # ScanResult
     failed = Signal(str)
+    extractor_ready = Signal(object)
 
     def __init__(
         self,
@@ -29,6 +31,7 @@ class ExtractionWorker(QObject):
         card_path: str,
         ocr_engine: str = "both",
         gpu: bool = True,
+        extractor: PassportDataExtractor | None = None,
     ) -> None:
         super().__init__()
         self.country_codes_file = country_codes_file
@@ -36,29 +39,45 @@ class ExtractionWorker(QObject):
         self.card_path = card_path
         self.ocr_engine = ocr_engine
         self.gpu = gpu
+        self._extractor_provided = extractor
 
     def run(self) -> None:
         try:
-            self.progress.emit(5)
-            self.status.emit("Initializing OCR…")
-            extractor = PassportDataExtractor(self.country_codes_file, gpu=self.gpu)
+            self.progress.emit(2)
+            
+            # Diagnostic: check Tesseract status before starting
+            if self._extractor_provided:
+                self.status.emit("Using cached OCR engine…")
+                extractor = self._extractor_provided
+            else:
+                self.status.emit("Initializing OCR engine (first time)…")
+                extractor = PassportDataExtractor(self.country_codes_file, gpu=self.gpu)
+                self.extractor_ready.emit(extractor)
+                
+            if not extractor._tesseract_available:
+                self.status.emit("OCR: Tesseract missing (using EasyOCR only)")
+            else:
+                self.status.emit("OCR: Tesseract engine ready")
 
             passport_data: dict = {}
             if self.passport_path:
-                self.progress.emit(25)
-                self.status.emit("Reading passport…")
+                self.status.emit("Reading Passport (Step 1: Reading MRZ)…")
+                self.progress.emit(10)
+                # passporteye + EasyOCR
                 passport_data = extractor.get_data(self.passport_path, ocr_engine=self.ocr_engine) or {}
+                self.progress.emit(45)
 
             card_data: dict = {}
             if self.card_path:
+                self.status.emit("Reading Employee Card (Step 2: Detailed OCR)…")
                 self.progress.emit(55)
-                self.status.emit("Reading employment card…")
                 card_data = extractor.get_foreign_employment_card_data(
                     self.card_path, ocr_engine=self.ocr_engine
                 ) or {}
+                self.progress.emit(85)
 
-            self.progress.emit(75)
-            self.status.emit("Combining fields…")
+            self.status.emit("Finalizing data and applying smart logic…")
+            self.progress.emit(90)
             
             # If a combined image was used, passport_data might already contain card fields.
             # We merge those into card_data so _build_combined picks them up.

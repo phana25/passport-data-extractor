@@ -34,59 +34,83 @@ class PassportDataExtractor:
     def __init__(self, country_codes_file, gpu=True):
         _configure_ssl_certificates()
         self._tesseract_available = self._configure_tesseract()
-        self.reader = easyocr.Reader(lang_list=['en'], gpu=gpu)
+        
+        # EasyOCR reader initialization — fall back to CPU if GPU initialization hangs or fails.
+        # This is especially common on macOS where CUDA is not available.
+        # Use a timeout or catch-all to prevent hangs on Windows with bad GPU drivers.
+        effective_gpu = False
+        if sys.platform == "win32" and gpu:
+            # On Windows, try GPU but fall back to CPU immediately if it fails
+            try:
+                self.reader = easyocr.Reader(lang_list=['en'], gpu=True)
+                effective_gpu = True
+            except Exception:
+                self.reader = easyocr.Reader(lang_list=['en'], gpu=False)
+        else:
+            self.reader = easyocr.Reader(lang_list=['en'], gpu=False)
+            
         with open(country_codes_file) as f:
             self.country_codes = json.load(f)
 
+
     def _configure_tesseract(self):
         """
-        Try to locate Tesseract executable.
+        Try to locate Tesseract executable across platforms.
         Returns True when available; False otherwise.
         """
-        # Respect explicit config if already provided.
         configured = getattr(pytesseract.pytesseract, "tesseract_cmd", "") or ""
         if configured and os.path.exists(configured):
             return True
 
-        # Try PATH first.
+        # Try system PATH first.
         exe = shutil.which("tesseract")
         if exe:
             pytesseract.pytesseract.tesseract_cmd = exe
             return True
 
-        # Prefer bundled binary (PyInstaller one-folder or one-file temp extraction).
-        bundled_candidates = []
+        # Candidates for bundled binaries (PyInstaller) and common system locations.
+        candidates = []
+        is_windows = sys.platform == "win32"
+        binary_name = "tesseract.exe" if is_windows else "tesseract"
+        
         if getattr(sys, "frozen", False):
+            # 1) Next to executable (one-folder)
             exe_dir = os.path.dirname(sys.executable)
-            bundled_candidates.append(os.path.join(exe_dir, "tesseract", "tesseract.exe"))
+            candidates.append(os.path.join(exe_dir, "tesseract", binary_name))
+            # 2) Temp extraction dir (one-file)
             meipass = getattr(sys, "_MEIPASS", "")
             if meipass:
-                bundled_candidates.append(os.path.join(meipass, "tesseract", "tesseract.exe"))
-
-        # Also support running from source with repo-local vendor directory.
+                candidates.append(os.path.join(meipass, "tesseract", binary_name))
+        
+        # 3) Project local vendor folder (dev mode)
         here = os.path.dirname(os.path.abspath(__file__))
-        bundled_candidates.append(os.path.join(here, "vendor", "tesseract", "tesseract.exe"))
+        candidates.append(os.path.join(here, "vendor", "tesseract", binary_name))
 
-        for candidate in bundled_candidates:
+        if not is_windows:
+            # 4) Common macOS Homebrew paths (Apple Silicon & Intel)
+            candidates.extend([
+                "/opt/homebrew/bin/tesseract",
+                "/usr/local/bin/tesseract",
+                "/usr/bin/tesseract"
+            ])
+        else:
+            # 5) Common Windows install locations
+            candidates.extend([
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            ])
+
+        for candidate in candidates:
             if os.path.exists(candidate):
                 pytesseract.pytesseract.tesseract_cmd = candidate
-                # Make sure tesseract can find traineddata.
+                # Configure TESSDATA_PREFIX for bundled distribution
                 tessdata_dir = os.path.join(os.path.dirname(candidate), "tessdata")
                 if os.path.isdir(tessdata_dir):
                     os.environ.setdefault("TESSDATA_PREFIX", tessdata_dir)
                 return True
 
-        # Common Windows install locations.
-        candidates = [
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        ]
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                pytesseract.pytesseract.tesseract_cmd = candidate
-                return True
-
         return False
+
 
     # Common OCR misreads of month abbreviations
     _MONTH_FIXES = {
@@ -171,7 +195,40 @@ class PassportDataExtractor:
     def _parse_ocr_date(self, date_string):
         """Parse date from OCR using dayfirst. Strips noise like dots in day (e.g. '13. JAN 2022')."""
         import datetime as _dt
-        cleaned = re.sub(r'(\d{1,2})\.\s+', r'\1 ', date_string.strip())
+        # 1. Fuzzy fixes for common OCR misreads in dates (S -> 5, I/l -> 1, O -> 0)
+        # We only do this locally to avoid corrupting other fields.
+        cleaned = date_string.strip().upper()
+        
+        # If the string looks like a date but has 'S', 'I', 'O', 'l', 'B' where digits should be
+        # e.g. "l3 JAN 2022" or "13 JAN 2O22"
+        if re.match(r'^[L|I|S|O|B|0-9].*', cleaned):
+            # Day part starting
+            cleaned = re.sub(r'^([L|I])(\d)\b', r'1\2', cleaned)
+            cleaned = re.sub(r'^(\d)([L|I])\b', r'\g<1>1', cleaned)
+            cleaned = re.sub(r'^(S)(\d)\b', r'5\2', cleaned)
+            cleaned = re.sub(r'^(\d)(S)\b', r'\g<1>5', cleaned)
+            cleaned = re.sub(r'^(O)(\d)\b', r'0\2', cleaned)
+            cleaned = re.sub(r'^(\d)(O)\b', r'\g<1>0', cleaned)
+            
+            # Year part (at the end)
+            cleaned = re.sub(r'\b(2[O|0]2[L|I|1])\b', r'2021', cleaned)
+            cleaned = re.sub(r'\b(2[O|0]2[O|0])\b', r'2020', cleaned)
+            cleaned = re.sub(r'\b2[O|0][L|I|1](\d)\b', r'201\1', cleaned)
+            # Generic catch remaining O in 4-digit years (like 2O28)
+            # but only securely if it already looks like a year
+            if "2O" in cleaned:
+                cleaned = cleaned.replace("2O", "20")
+
+        # After fuzzy fixes, strip out garbage like 'SA/' in '05 SA/MAR 2028'
+        # or '03.AUG 1991' -> '03 AUG 1991'
+        months = 'JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC'
+        m = re.search(r'([0-9]{1,2})[.,\sA-Z/]+(' + months + r')[A-Z]*[.,\s/]+([0-9]{2,4})', cleaned)
+        if m:
+            cleaned = f"{m.group(1)} {m.group(2)} {m.group(3)}"
+        else:
+            # Fallback for just MMM YYYY or generic stripping
+            cleaned = re.sub(r'(\d{1,2})[.,]\s+', r'\1 ', cleaned)
+
         try:
             date = parser.parse(
                 cleaned, dayfirst=True,
@@ -242,14 +299,21 @@ class PassportDataExtractor:
         return 'Not Found'
 
     def _get_all_date_patterns(self):
+        d = r'[0-9OISlB]'
+        months = r'JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC'
         return [
-            r'\d{2}[-/.]\d{2}[-/.]\d{2,4}',  # DD-MM-YYYY / DD/MM/YY / DD.MM.YYYY
-            r'\d{4}[-/.]\d{2}[-/.]\d{2}',     # YYYY-MM-DD
-            r'\d{1,2} \d{1,2} \d{2,4}',
-            r'\d{1,2}\.?\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s+\d{2,4}',  # 13. JAN 2022 or 26 Jan 18
-            r'\d{2} \b(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b \d{4}',
-            r'\b(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b\.?\s+\d{1,2}\.?,?\s+\d{4}',
-            r'\b(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\b\s+\d{4}',  # MMM YYYY
+            # DD-MM-YYYY / DD/MM/YY / DD.MM.YYYY
+            f'{d}{{2}}[-/.]{d}{{2}}[-/.]{d}{{2,4}}',
+            # YYYY-MM-DD
+            f'{d}{{4}}[-/.]{d}{{2}}[-/.]{d}{{2}}',
+            # DD MM YYYY (numeric with spaces)
+            f'{d}{{1,2}} {d}{{1,2}} {d}{{2,4}}',
+            # DD MMM YYYY (with potential noise between DD and MMM) e.g., 05 SA/MAR 2028 or 03.AUG 1991
+            f'{d}{{1,2}}[.,\\sA-Z/]+(?:{months})[A-Z]*[.,\\s/]+{d}{{2,4}}',
+            # MMM DD YYYY (with noise)
+            f'\\b(?:{months})\\b[.,\\sA-Z/]+{d}{{1,2}}[.,\\sA-Z/]+{d}{{2,4}}',
+            # MMM YYYY (fallback, e.g. if day is missing)
+            f'\\b(?:{months})\\b\\s+{d}{{2,4}}',
         ]
 
     def _collect_all_dates(self, ocr_text):
@@ -260,10 +324,14 @@ class PassportDataExtractor:
         mon_only_pat = re.compile(
             r'^(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+\d{4}$', re.IGNORECASE
         )
+        # Create a single joined string so regex '\s+' can bridge dates split across newlines
+        full_text_blob = " ".join(ocr_text)
+        search_lines = list(ocr_text) + [full_text_blob]
+        
         # best[(month, year)] = (day, full_date_str)
         best = {}
 
-        for line in ocr_text:
+        for line in search_lines:
             for pattern in self._get_all_date_patterns():
                 for date_match in re.findall(pattern, line, re.IGNORECASE):
                     parsed = self._parse_ocr_date(date_match)
@@ -285,22 +353,82 @@ class PassportDataExtractor:
         return {v for _, v in best.values()}
 
     def find_issuing_date(self, ocr_text, dob_str=None, expiry_str=None):
-        dates = self._collect_all_dates(ocr_text)
+        """
+        Smart Date Recognition: Picks the best 'Issue Date' by scoring candidates.
+        Scores based on: Proximity to keywords, Plausibility (between DOB and Expiry).
+        """
+        candidates = self._collect_all_dates(ocr_text)
+        if not candidates:
+            return 'Not Found'
 
+        # Parse comparison dates if available
+        dob = None
         if dob_str and dob_str != 'Not Found':
-            dates.discard(dob_str)
-        if expiry_str and expiry_str != 'Not Found':
-            dates.discard(expiry_str)
+            try:
+                dob = parser.parse(dob_str, dayfirst=True).date()
+            except Exception:
+                pass
 
-        if len(dates) >= 3:
-            sorted_dates = sorted(dates, key=lambda x: parser.parse(x, dayfirst=True))
-            return sorted_dates[1]
-        if len(dates) == 1:
-            return next(iter(dates))
-        if len(dates) == 2:
-            sorted_dates = sorted(dates, key=lambda x: parser.parse(x, dayfirst=True))
-            return sorted_dates[0]
-        return 'Not Found'
+        expiry = None
+        if expiry_str and expiry_str != 'Not Found':
+            try:
+                expiry = parser.parse(expiry_str, dayfirst=True).date()
+            except Exception:
+                pass
+
+        scored_candidates = []
+        issue_keywords = ['ISSUE', 'ISSUANCE', 'ISSUED', 'DATE OF ISSUE', 'DATE OF ISSUANCE']
+        
+        # We also look at the raw OCR lines for keyword proximity
+        ocr_blob = " ".join(ocr_text).upper()
+
+        for cand_str in candidates:
+            score = 0
+            try:
+                cand_date = parser.parse(cand_str, dayfirst=True).date()
+            except Exception:
+                continue
+
+            # 1. Keyword Proximity Score
+            # Check if the year strongly appears in the same line as an issue keyword
+            for line in ocr_text:
+                if str(cand_date.year) in line:
+                    if any(kw in line.upper() for kw in issue_keywords):
+                        score += 10
+                        break
+
+            # 2. Strong Plausibility (Delta Years)
+            if expiry:
+                delta_years = expiry.year - cand_date.year
+                if delta_years in [10, 5]:
+                    score += 50  # Issue dates are typically 10 or 5 years before expiry
+                elif delta_years > 0:
+                    score += 10  # Valid past date relative to expiry
+                elif delta_years < 0:
+                    score -= 100 # Issue date cannot be AFTER expiry
+            
+            # General bounds
+            if dob and cand_date > dob:
+                score += 5
+            if expiry and cand_date < expiry:
+                score += 5
+
+            # 3. Penalty for exact matches to DOB/Expiry (to avoid picking them)
+            if dob_str == cand_str or expiry_str == cand_str:
+                score -= 100
+            if dob and cand_date == dob:
+                score -= 100
+            if expiry and cand_date == expiry:
+                score -= 100
+
+            scored_candidates.append((score, cand_str))
+
+        if not scored_candidates:
+            return 'Not Found'
+
+        # Sort by score (descending) and then date (ascending)
+        scored_candidates.sort(key=lambda x: (-x[0], x[1]))
+        return scored_candidates[0][1]
 
     def print_data(self, data):
         for key, value in data.items():
@@ -350,6 +478,7 @@ class PassportDataExtractor:
 
         for i, line in enumerate(normalized_lines):
             if label_upper in line.upper():
+                # Proximity Check 1: Same line
                 for pattern in date_patterns:
                     date_matches = re.findall(pattern, line, re.IGNORECASE)
                     for date_match in date_matches:
@@ -357,14 +486,18 @@ class PassportDataExtractor:
                         if parsed_date:
                             return parsed_date
 
+                # Proximity Check 2: Immediately following line
                 if i + 1 < len(normalized_lines):
                     next_line = normalized_lines[i + 1]
-                    for pattern in date_patterns:
-                        date_matches = re.findall(pattern, next_line, re.IGNORECASE)
-                        for date_match in date_matches:
-                            parsed_date = self._parse_ocr_date(date_match)
-                            if parsed_date:
-                                return parsed_date
+                    # To avoid picking a date from a totally different section,
+                    # we ensure the next line is "close" (doesn't look like a new field header)
+                    if not any(header in next_line.upper() for header in ['NAME', 'PASSPORT', 'AUTHORITY', 'BIRTH']):
+                        for pattern in date_patterns:
+                            date_matches = re.findall(pattern, next_line, re.IGNORECASE)
+                            for date_match in date_matches:
+                                parsed_date = self._parse_ocr_date(date_match)
+                                if parsed_date:
+                                    return parsed_date
 
         return 'Not Found'
 
@@ -475,9 +608,15 @@ class PassportDataExtractor:
                     b = b + '<' * (44 - len(b))
 
                 surname_names = a[5:44].split('<<', 1)
-                surname, names = surname_names if len(surname_names) == 2 else (surname_names[0], '')
-                name = names.replace('<', ' ').strip().upper()
-                surname = surname.replace('<', ' ').strip().upper()
+                surname_fallback, names_fallback = surname_names if len(surname_names) == 2 else (surname_names[0], '')
+                name = names_fallback.replace('<', ' ').strip().upper()
+                surname = surname_fallback.replace('<', ' ').strip().upper()
+
+                # Prefer passporteye's highly accurate built-in MRZ parser over manual EasyOCR string splitting
+                mrz_data = mrz.to_dict()
+                if mrz_data.get('names') and mrz_data.get('surname'):
+                    name = mrz_data.get('names').replace('<', ' ').strip().upper()
+                    surname = mrz_data.get('surname').replace('<', ' ').strip().upper()
               
                 full_img = cv2.imread(img_name)
                 ocr_results = self._ocr_lines(full_img, engine=ocr_engine)

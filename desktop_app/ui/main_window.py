@@ -40,6 +40,7 @@ from desktop_app.services.history_store import HistoryStore, HistoryItem
 from desktop_app.services.updater import CheckUpdateWorker, DownloadUpdateWorker, UpdaterService
 from desktop_app.ui.preview import ImagePreview, UploadPreviewZone
 from desktop_app.ui.styles import get_stylesheet
+from passport_data_extractor import PassportDataExtractor
 
 
 class MainWindow(QMainWindow):
@@ -56,6 +57,7 @@ class MainWindow(QMainWindow):
         self._passport_path: str | None = None
         self._card_path: str | None = None
         self._last_result: ScanResult | None = None
+        self._extractor: PassportDataExtractor | None = None
 
         self._thread: QThread | None = None
         self._worker: ExtractionWorker | None = None
@@ -781,9 +783,17 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Verifying…")
         self.btn_verify.setEnabled(False)
         self.btn_save_excel.setEnabled(False)
-        passport = self._passport_path or ""
-        card = self._card_path or ""
+
+        # Clear fields before starting a new scan to prevent stale data display
+        for w in list(self.passport_out.values()) + list(self.card_out.values()) + list(self.other_out.values()):
+            w.clear()
+        
+        # Get potentially rotated paths
+        passport = self.passport_preview.get_current_path() or ""
+        card = self.card_preview.get_current_path() or ""
+        
         self._start_worker(passport, card, "both")
+
 
     def _clear(self) -> None:
         self._passport_path = None
@@ -810,7 +820,9 @@ class MainWindow(QMainWindow):
             card_path=card_path,
             ocr_engine=ocr_engine,
             gpu=True,
+            extractor=self._extractor,
         )
+
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self.progress.setValue)
@@ -820,7 +832,11 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
         self._thread.finished.connect(self._thread.deleteLater)
+        self._worker.extractor_ready.connect(self._save_extractor)
         self._thread.start()
+
+    def _save_extractor(self, extractor: object) -> None:
+        self._extractor = extractor
 
     def _set_field_values(self, mapping: dict, data: dict, extra: dict | None = None) -> None:
         merged = {**(extra or {}), **data}
