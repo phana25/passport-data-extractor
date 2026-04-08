@@ -1,6 +1,6 @@
 {
   "latest_version": "1.1.0",
-  "windows_url": "https://github.com/phana25/passport-data-extractor/releases/download/v1.1.0/PassportVerifier_v1.1.0.exe",
+  "windows_url": "https://github.com/phana25/passport-data-extractor/releases/download/v1.1.0/Passport-Data-Extractor-Setup-v1.1.0.exe",
   "mac_url": "https://github.com/phana25/passport-data-extractor/releases/download/v1.1.0/PassportVerifier_v1.1.0_mac.zip",
   "release_notes": "New OCR features, smarter date/issue detection, improved previews, and UI refinements."
 }
