@@ -755,9 +755,13 @@ class PassportDataExtractor:
         bd1, bd2, bd3 = self._split_date_components(passport_data.get('Date of Birth', 'Not Found'))
         iss1, iss2, iss3 = self._split_date_components(passport_data.get('Date of Issue', 'Not Found'))
         ed1, ed2, ed3 = self._split_date_components(passport_data.get('Date of Expiry', 'Not Found'))
-        full_name = passport_data.get('Name', 'Not Found')
-        if full_name == 'Not Found' and (surname != 'Not Found' or given != 'Not Found'):
-            full_name = f'{given} {surname}'.strip() or 'Not Found'
+        # Keep NAME 02 consistent with form layout: SURNAME first, then GSURNAME.
+        full_name_parts = []
+        if surname and surname != 'Not Found':
+            full_name_parts.append(surname)
+        if given and given != 'Not Found':
+            full_name_parts.append(given)
+        full_name = ' '.join(full_name_parts) if full_name_parts else 'Not Found'
         return {
             'SURNAME':       surname,
             'GSURNAME':      given,
