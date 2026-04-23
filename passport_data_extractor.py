@@ -176,10 +176,12 @@ class PassportDataExtractor:
 
     def parse_birth_date(self, date_string):
         try:
-            # Parse the date assuming the year is in the range 1900-2099
+            # MRZ DOB is YYMMDD; dateutil may pick a future century for some values.
+            # Keep it in a realistic passport holder range: if parsed year is in the future,
+            # roll it back by 100 years (e.g. 2088 -> 1988). Do not force 2001 -> 1901.
+            import datetime as _dt
             date = parser.parse(date_string, yearfirst=True).date()
-            # Adjust the year if it falls outside the expected range
-            if date.year >= 2000:
+            if date.year > _dt.date.today().year:
                 date = date.replace(year=date.year - 100)
             return date.strftime('%d/%m/%Y')
         except ValueError:
@@ -439,6 +441,135 @@ class PassportDataExtractor:
         cleaned = re.sub(r'\s{2,}', ' ', cleaned)
         return cleaned.strip()
 
+    def _normalize_mrz_name_token(self, token):
+        value = (token or '').strip().upper()
+        value = value.replace('«', '<').replace('|', '<')
+        value = re.sub(r'<+', ' ', value)
+        # Keep only letters/spaces for names.
+        value = re.sub(r'[^A-Z ]+', ' ', value)
+        value = re.sub(r'\s{2,}', ' ', value).strip()
+        # OCR often reads MRZ filler "<" as repeated letters (e.g., KKKKKKKK).
+        # Remove suspicious repeated trailing noise.
+        value = re.sub(r'\b([A-Z])\1{2,}\b$', '', value).strip()
+        # Remove trailing single-letter garbage tokens often produced by OCR filler
+        # (e.g. "YAOZU K K" -> "YAOZU"). Keep initials only when the whole name is initials.
+        tokens = [t for t in value.split(' ') if t]
+        if any(len(t) > 1 for t in tokens):
+            while tokens and len(tokens[-1]) == 1:
+                tokens.pop()
+        value = ' '.join(tokens).strip()
+        return value
+
+    def _mrz_name_quality(self, given, surname):
+        full = f"{surname} {given}".strip()
+        if not full:
+            return -1
+        letters = len(re.findall(r'[A-Z]', full))
+        spaces = full.count(' ')
+        penalties = 0
+        if re.search(r'([A-Z])\1{3,}', full):
+            penalties += 8
+        if letters < 3:
+            penalties += 5
+        return letters + spaces - penalties
+
+    def _parse_name_from_mrz_line(self, line_a):
+        """
+        Parse surname/given names from MRZ line 1 with tolerance for OCR noise.
+        Handles formats like P<CHNSURNAME<<GIVEN<NAMES and common '<' misreads.
+        """
+        if not line_a:
+            return '', ''
+
+        raw = re.sub(r'\s+', '', line_a).upper()
+        # Common OCR confusion in MRZ: '<' read as '«' or occasionally '|'
+        raw = raw.replace('«', '<').replace('|', '<')
+
+        # Try to split standard "....<<...." first.
+        if '<<' in raw:
+            left, right = raw.split('<<', 1)
+        else:
+            # Weak fallback: no clear separator means we cannot reliably infer both parts.
+            return '', ''
+
+        # Strip document prefix/country code, e.g. P<CHN or POCHN (OCR '<' -> 'O')
+        if re.match(r'^P[<O][A-Z]{3}', left):
+            left = left[5:]
+        elif left.startswith('P<') and len(left) > 5:
+            left = left[5:]
+
+        surname = self._normalize_mrz_name_token(left)
+        given = self._normalize_mrz_name_token(right)
+        return given, surname
+
+    def _extract_visual_latin_name(self, ocr_lines):
+        """
+        Extract name from visual zone lines like:
+        'YANG, YAOZU' or 'TANG, FANGFANG'.
+        Returns (given, surname) or ('', '').
+        """
+        stopwords = {
+            'PEOPLE', 'REPUBLIC', 'CHINA', 'PASSPORT', 'MINISTRY', 'FOREIGN',
+            'AFFAIRS', 'REQUESTS', 'AUTHORITIES', 'ALLOW', 'BEARER', 'ASSISTANCE',
+            'DATE', 'BIRTH', 'ISSUE', 'EXPIRY', 'NATIONALITY', 'AUTHORITY'
+        }
+        for line in ocr_lines:
+            n = self._normalize_ocr_line(line).upper()
+            # Normalize separators and keep only useful symbols for matching.
+            n = n.replace('，', ',')
+            m = re.search(r'\b([A-Z]{2,})\s*,\s*([A-Z][A-Z ]{1,})\b', n)
+            if not m:
+                continue
+            surname = self._normalize_mrz_name_token(m.group(1))
+            given = self._normalize_mrz_name_token(m.group(2))
+
+            if not surname or not given:
+                continue
+
+            surname_tokens = surname.split()
+            given_tokens = given.split()
+            all_tokens = surname_tokens + given_tokens
+
+            # Safety filters to avoid selecting random paragraph text.
+            if len(surname_tokens) != 1:
+                continue
+            if len(given_tokens) > 2:
+                continue
+            if any(len(t) == 1 for t in all_tokens):
+                continue
+            if any(t in stopwords for t in all_tokens):
+                continue
+            if len(''.join(all_tokens)) > 24:
+                continue
+
+            return given, surname
+        return '', ''
+
+    def _extract_given_by_surname_from_visual(self, ocr_lines, surname):
+        """
+        Find a visual-zone Latin line containing the detected surname and return
+        the token immediately after it as given name.
+        Example: "YANG, YAOZU" -> "YAOZU"
+        """
+        s = self._normalize_mrz_name_token(surname)
+        if not s:
+            return ''
+        for line in ocr_lines:
+            n = self._normalize_ocr_line(line).upper()
+            # Keep letters and common separators, then split to tokens.
+            n = re.sub(r'[^A-Z,.\- ]+', ' ', n)
+            n = re.sub(r'[,.\-]+', ' ', n)
+            tokens = [t for t in n.split() if t]
+            if not tokens:
+                continue
+            for i, tok in enumerate(tokens[:-1]):
+                if tok == s:
+                    candidate = self._normalize_mrz_name_token(tokens[i + 1])
+                    # Keep only realistic given-name token lengths.
+                    if 2 <= len(candidate) <= 14:
+                        return candidate
+        return ''
+
     def _extract_labeled_fields(self, ocr_lines, label_map):
         normalized_lines = [self._normalize_ocr_line(line) for line in ocr_lines if line.strip()]
         results = {field: 'Not Found' for field in label_map.keys()}
@@ -607,22 +738,42 @@ class PassportDataExtractor:
                 if len(b) < 44:
                     b = b + '<' * (44 - len(b))
 
-                surname_names = a[5:44].split('<<', 1)
-                surname_fallback, names_fallback = surname_names if len(surname_names) == 2 else (surname_names[0], '')
-                name = names_fallback.replace('<', ' ').strip().upper()
-                surname = surname_fallback.replace('<', ' ').strip().upper()
+                name, surname = self._parse_name_from_mrz_line(a)
 
                 # Prefer passporteye's highly accurate built-in MRZ parser over manual EasyOCR string splitting
                 mrz_data = mrz.to_dict()
                 if mrz_data.get('names') and mrz_data.get('surname'):
-                    name = mrz_data.get('names').replace('<', ' ').strip().upper()
-                    surname = mrz_data.get('surname').replace('<', ' ').strip().upper()
+                    parsed_given = self._normalize_mrz_name_token(mrz_data.get('names'))
+                    parsed_surname = self._normalize_mrz_name_token(mrz_data.get('surname'))
+                    # Keep whichever source looks cleaner: passporteye parsed fields vs OCR MRZ line parse.
+                    if self._mrz_name_quality(parsed_given, parsed_surname) >= self._mrz_name_quality(name, surname):
+                        name, surname = parsed_given, parsed_surname
               
                 full_img = cv2.imread(img_name)
                 ocr_results = self._ocr_lines(full_img, engine=ocr_engine)
                 ocr_extended = self._rejoin_split_ocr_dates(ocr_results)
 
-                user_info['Name'] = f"{name} {surname}"
+                # Visual-zone fallback can correct MRZ OCR noise (e.g. trailing "K K").
+                v_given, v_surname = self._extract_visual_latin_name(ocr_results)
+                if self._mrz_name_quality(v_given, v_surname) > self._mrz_name_quality(name, surname):
+                    name, surname = v_given, v_surname
+
+                # Final targeted correction: if visual line has a clean token right after
+                # the chosen surname, prefer it over noisy MRZ given names (e.g. YAROZU -> YAOZU).
+                given_from_surname = self._extract_given_by_surname_from_visual(ocr_results, surname)
+                if given_from_surname and (
+                    not name or
+                    name == 'Not Found' or
+                    len(given_from_surname) < len(name) + 2
+                ):
+                    name = given_from_surname
+
+                user_info['Given Names'] = name if name else 'Not Found'
+                user_info['Surname'] = surname if surname else 'Not Found'
+                full_name = ' '.join(
+                    [p for p in [user_info['Surname'], user_info['Given Names']] if p != 'Not Found']
+                )
+                user_info['Name'] = full_name if full_name else 'Not Found'
                 dob = self.parse_birth_date(b[13:19])
                 expiry = self.parse_date(b[21:27])
                 user_info['Date of Birth'] = dob
@@ -751,7 +902,10 @@ class PassportDataExtractor:
         return surname, given
 
     def _build_combined(self, passport_data, card_data):
-        surname, given = self._split_name(passport_data.get('Name', 'Not Found'))
+        surname = passport_data.get('Surname', 'Not Found')
+        given = passport_data.get('Given Names', 'Not Found')
+        if surname == 'Not Found' and given == 'Not Found':
+            surname, given = self._split_name(passport_data.get('Name', 'Not Found'))
         bd1, bd2, bd3 = self._split_date_components(passport_data.get('Date of Birth', 'Not Found'))
         iss1, iss2, iss3 = self._split_date_components(passport_data.get('Date of Issue', 'Not Found'))
         ed1, ed2, ed3 = self._split_date_components(passport_data.get('Date of Expiry', 'Not Found'))
