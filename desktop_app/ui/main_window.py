@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSettings, QThread
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QFormLayout,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -41,6 +44,32 @@ from desktop_app.services.updater import CheckUpdateWorker, DownloadUpdateWorker
 from desktop_app.ui.preview import ImagePreview, UploadPreviewZone
 from desktop_app.ui.styles import get_stylesheet
 from passport_data_extractor import PassportDataExtractor
+
+
+class CopyableTableWidget(QTableWidget):
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.Copy):
+            self._copy_selection_to_clipboard()
+            return
+        super().keyPressEvent(event)
+
+    def _copy_selection_to_clipboard(self) -> None:
+        indexes = self.selectedIndexes()
+        if not indexes:
+            return
+
+        rows = sorted({index.row() for index in indexes})
+        cols = sorted({index.column() for index in indexes})
+        row_map = {row: i for i, row in enumerate(rows)}
+        col_map = {col: i for i, col in enumerate(cols)}
+
+        grid = [["" for _ in cols] for _ in rows]
+        for index in indexes:
+            item = self.item(index.row(), index.column())
+            grid[row_map[index.row()]][col_map[index.column()]] = item.text() if item else ""
+
+        text = "\n".join("\t".join(row) for row in grid)
+        QApplication.clipboard().setText(text)
 
 
 class MainWindow(QMainWindow):
@@ -404,17 +433,38 @@ class MainWindow(QMainWindow):
                 field_lay = QVBoxLayout(field_container)
                 field_lay.setSpacing(2)
                 field_lay.setContentsMargins(0, 0, 0, 0)
-                
+
+                label_row = QHBoxLayout()
+                label_row.setContentsMargins(0, 0, 0, 0)
+                label_row.setSpacing(4)
+
                 lbl = QLabel(name)
                 lbl.setObjectName("data-field-label")
-                
+                label_row.addWidget(lbl)
+                label_row.addStretch()
+
                 val = QLineEdit()
                 val.setObjectName("data-field")
                 val.setPlaceholderText("—")
                 val.setMinimumHeight(30)
-                
-                field_lay.addWidget(lbl)
-                field_lay.addWidget(val)
+
+                if name == "NAME 02":
+                    self.btn_name02_recalc = QPushButton("↻")
+                    self.btn_name02_recalc.setFixedSize(16, 16)
+                    self.btn_name02_recalc.setCursor(Qt.PointingHandCursor)
+                    self.btn_name02_recalc.setToolTip("Recalculate NAME 02 from SURNAME and GSURNAME")
+                    self.btn_name02_recalc.setStyleSheet(
+                        "QPushButton { background: transparent; color: #94a3b8; font-weight: bold; border: none; padding: 0; } "
+                        "QPushButton:hover { color: #f8fafc; }"
+                    )
+                    self.btn_name02_recalc.clicked.connect(self._recalculate_name02_from_fields)
+                    label_row.addWidget(self.btn_name02_recalc, 0, Qt.AlignVCenter)
+
+                field_lay.addLayout(label_row)
+                if name == "NAME 02":
+                    field_lay.addWidget(val)
+                else:
+                    field_lay.addWidget(val)
                 
                 row = i // columns
                 col = i % columns
@@ -593,13 +643,19 @@ class MainWindow(QMainWindow):
             # Prepare display headers (M_VAL -> M)
             display_headers = [h if h != 'M_VAL' else 'M' for h in self.excel_headers]
             
-            table = QTableWidget()
+            table = CopyableTableWidget()
             table.setColumnCount(len(display_headers))
             table.setHorizontalHeaderLabels(display_headers)
-            table.verticalHeader().setVisible(False)
+            table.verticalHeader().setVisible(True)
             table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-            table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            table.setSelectionBehavior(QAbstractItemView.SelectItems)
             table.setAlternatingRowColors(True)
+            table.setCornerButtonEnabled(True)
+            table.horizontalHeader().setSectionsClickable(True)
+            table.verticalHeader().setSectionsClickable(True)
+            table.horizontalHeader().sectionClicked.connect(table.selectColumn)
+            table.verticalHeader().sectionClicked.connect(table.selectRow)
             table.setStyleSheet(f"""
                 QTableWidget {{ background: {bg_color}; color: {text_color}; border: none; gridline-color: {grid_color}; }}
                 QHeaderView {{ background-color: {header_bg}; border: none; }}
@@ -883,6 +939,32 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.status_label.setText("Verification failed.")
         QMessageBox.critical(self, "Verification failed", message)
+
+    def _recalculate_name02_from_fields(self) -> None:
+        surname_text = self.passport_out.get("SURNAME").text().strip() if self.passport_out.get("SURNAME") else ""
+        given_text = self.passport_out.get("GSURNAME").text().strip() if self.passport_out.get("GSURNAME") else ""
+        name02 = " ".join([p for p in [surname_text, given_text] if p]).strip()
+
+        self.passport_out["NAME 02"].setText(name02)
+
+        if self._last_result:
+            passport_data = dict(self._last_result.passport_data or {})
+            passport_data["Surname"] = surname_text or passport_data.get("Surname", "")
+            passport_data["Given Names"] = given_text or passport_data.get("Given Names", "")
+            passport_data["Name"] = name02 or passport_data.get("Name", "")
+
+            combined = dict(self._last_result.combined or {})
+            combined["SURNAME"] = surname_text
+            combined["GSURNAME"] = given_text
+            combined["NAME 02"] = name02
+            self._last_result = ScanResult(
+                passport_data=passport_data,
+                card_data=self._last_result.card_data,
+                combined=combined,
+            )
+
+        self.status_label.setText("NAME 02 recalculated from SURNAME and GSURNAME.")
+        self.btn_save_excel.setEnabled(True)
 
     def _save_data(self) -> None:
         result = self._last_result

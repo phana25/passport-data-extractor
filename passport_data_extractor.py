@@ -31,6 +31,12 @@ def _configure_ssl_certificates():
     ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=cafile)
 
 class PassportDataExtractor:
+    _NAME_STOPWORDS = {
+        'ADMINISTRATION', 'IMMIGRATION', 'NATIONAL', 'REPUBLIC', 'PEOPLE',
+        'CHINA', 'PRC', 'AUTHORITY', 'PASSPORT', 'MINISTRY', 'FOREIGN',
+        'OFFICE', 'ISSUE', 'ISSUING', 'BEARER'
+    }
+
     def __init__(self, country_codes_file, gpu=True):
         _configure_ssl_certificates()
         self._tesseract_available = self._configure_tesseract()
@@ -473,6 +479,25 @@ class PassportDataExtractor:
             penalties += 5
         return letters + spaces - penalties
 
+    def _is_suspicious_name(self, given, surname):
+        full = f"{surname} {given}".strip().upper()
+        if not full:
+            return True
+
+        tokens = [t for t in re.findall(r'[A-Z]+', full) if t]
+        if not tokens:
+            return True
+
+        # Names dominated by known document/authority words are invalid.
+        if any(t in self._NAME_STOPWORDS for t in tokens):
+            return True
+
+        # Single-token names with very long value are often OCR paragraph noise.
+        if len(tokens) == 1 and len(tokens[0]) > 18:
+            return True
+
+        return False
+
     def _parse_name_from_mrz_line(self, line_a):
         """
         Parse surname/given names from MRZ line 1 with tolerance for OCR noise.
@@ -569,6 +594,21 @@ class PassportDataExtractor:
                     if 2 <= len(candidate) <= 14:
                         return candidate
         return ''
+
+    def _extract_mrz_name_from_ocr_lines(self, ocr_lines):
+        """
+        Find MRZ-like line from full-image OCR and parse name as fallback.
+        """
+        for line in ocr_lines:
+            n = re.sub(r'\s+', '', (line or '').upper())
+            n = n.replace('«', '<').replace('|', '<')
+            # Typical MRZ line 1 starts with P<CCC...
+            if not re.match(r'^P[<O][A-Z]{3}[A-Z<]{8,}$', n):
+                continue
+            given, surname = self._parse_name_from_mrz_line(n)
+            if given and surname and not self._is_suspicious_name(given, surname):
+                return given, surname
+        return '', ''
 
     def _extract_labeled_fields(self, ocr_lines, label_map):
         normalized_lines = [self._normalize_ocr_line(line) for line in ocr_lines if line.strip()]
@@ -706,6 +746,155 @@ class PassportDataExtractor:
             return self._easyocr_lines(img)
         return self._dual_ocr_lines(img)
 
+    def _locate_roi_in_full_image(self, full_img, roi_img):
+        """
+        Locate ROI position inside full image for debug visualization.
+        Returns (x, y, w, h) or None.
+        """
+        if full_img is None or roi_img is None:
+            return None
+        if full_img.size == 0 or roi_img.size == 0:
+            return None
+
+        full_gray = cv2.cvtColor(full_img, cv2.COLOR_BGR2GRAY) if len(full_img.shape) == 3 else full_img
+        roi_gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY) if len(roi_img.shape) == 3 else roi_img
+
+        fh, fw = full_gray.shape[:2]
+        rh, rw = roi_gray.shape[:2]
+        if rh >= fh or rw >= fw:
+            return None
+
+        res = cv2.matchTemplate(full_gray, roi_gray, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        if max_val < 0.55:
+            return None
+        x, y = max_loc
+        return x, y, rw, rh
+
+    def _mrz_char_value(self, ch):
+        if '0' <= ch <= '9':
+            return ord(ch) - ord('0')
+        if 'A' <= ch <= 'Z':
+            return ord(ch) - ord('A') + 10
+        if ch == '<':
+            return 0
+        return 0
+
+    def _mrz_check_digit(self, data):
+        weights = [7, 3, 1]
+        total = 0
+        for i, ch in enumerate(data):
+            total += self._mrz_char_value(ch) * weights[i % 3]
+        return str(total % 10)
+
+    def _normalize_mrz_line(self, line, line_index):
+        s = re.sub(r'\s+', '', (line or '').upper())
+        s = s.replace('«', '<').replace('|', '<')
+        s = re.sub(r'[^A-Z0-9<]', '<', s)
+        if line_index == 0:
+            # For line 1 keep letters and fillers; avoid over-correcting.
+            pass
+        else:
+            # For line 2 numeric-heavy fields, fix common OCR digit confusions.
+            s = s.replace('O', '0').replace('Q', '0')
+            s = s.replace('I', '1').replace('L', '1')
+            s = s.replace('B', '8')
+        return s
+
+    def _mrz_validation_score(self, line1, line2):
+        """
+        Validate TD3 MRZ check digits and return a score and details.
+        """
+        score = 0
+        details = {}
+        if len(line1) != 44 or len(line2) != 44:
+            return -100, {'length_ok': False}
+
+        details['length_ok'] = True
+        if line1.startswith('P<'):
+            score += 8
+            details['doc_prefix_ok'] = True
+        else:
+            details['doc_prefix_ok'] = False
+
+        # TD3 checks: passport no, DOB, expiry, personal no, composite.
+        checks = [
+            ('passport', line2[0:9], line2[9]),
+            ('dob', line2[13:19], line2[19]),
+            ('expiry', line2[21:27], line2[27]),
+            ('personal', line2[28:42], line2[42]),
+        ]
+        pass_count = 0
+        for key, data, chk in checks:
+            ok = self._mrz_check_digit(data) == chk
+            details[f'{key}_ok'] = ok
+            if ok:
+                pass_count += 1
+                score += 20
+
+        composite_data = line2[0:10] + line2[13:20] + line2[21:43]
+        composite_ok = self._mrz_check_digit(composite_data) == line2[43]
+        details['composite_ok'] = composite_ok
+        if composite_ok:
+            pass_count += 1
+            score += 30
+
+        details['check_pass_count'] = pass_count
+        return score, details
+
+    def _build_mrz_candidates(self, ocr_code_lines):
+        candidates = []
+        lines = [self._normalize_mrz_line(l, 0) for l in ocr_code_lines if l and str(l).strip()]
+        for i in range(len(lines)):
+            for j in range(len(lines)):
+                if i == j:
+                    continue
+                l1 = self._normalize_mrz_line(lines[i], 0)
+                l2 = self._normalize_mrz_line(lines[j], 1)
+                if len(l1) < 30 or len(l2) < 30:
+                    continue
+                l1 = (l1 + '<' * 44)[:44]
+                l2 = (l2 + '<' * 44)[:44]
+                candidates.append((l1, l2))
+        return candidates
+
+    def _select_best_mrz_candidate(self, ocr_code_lines, mrz_obj=None):
+        """
+        Select best MRZ line pair by checksum + format + name plausibility.
+        """
+        candidates = self._build_mrz_candidates(ocr_code_lines)
+        if not candidates:
+            return None
+
+        best = None
+        for line1, line2 in candidates:
+            base_score, details = self._mrz_validation_score(line1, line2)
+            given, surname = self._parse_name_from_mrz_line(line1)
+            name_score = self._mrz_name_quality(given, surname)
+            suspicious_penalty = 35 if self._is_suspicious_name(given, surname) else 0
+            total = base_score + name_score - suspicious_penalty
+            rec = {
+                'line1': line1,
+                'line2': line2,
+                'given': given,
+                'surname': surname,
+                'score': total,
+                'details': details,
+            }
+            if best is None or rec['score'] > best['score']:
+                best = rec
+
+        # Compare with passporteye parsed name and keep cleaner one if available.
+        if best and mrz_obj:
+            mrz_data = mrz_obj.to_dict()
+            pg = self._normalize_mrz_name_token(mrz_data.get('names', ''))
+            ps = self._normalize_mrz_name_token(mrz_data.get('surname', ''))
+            if pg and ps and not self._is_suspicious_name(pg, ps):
+                if self._mrz_name_quality(pg, ps) >= self._mrz_name_quality(best['given'], best['surname']):
+                    best['given'], best['surname'] = pg, ps
+
+        return best
+
     def get_data(self, img_name, debug=False, ocr_engine='both'):
         user_info = {}
         with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmpfile:
@@ -720,7 +909,9 @@ class PassportDataExtractor:
                 mrz = None
                 self._tesseract_available = False
             if mrz:
-                mpimg.imsave(tmpfile_path, mrz.aux['roi'], cmap='gray')
+                # MRZ-specific path: OCR only the MRZ crop for MRZ fields.
+                mrz_roi = mrz.aux['roi']
+                mpimg.imsave(tmpfile_path, mrz_roi, cmap='gray')
                 img = cv2.imread(tmpfile_path)
                 img = cv2.resize(img, (1110, 140))
                 allowlist = st.ascii_letters + st.digits + '< '
@@ -728,28 +919,30 @@ class PassportDataExtractor:
 
                 if len(code) < 2:
                     return print(f'Error: Insufficient OCR results for image {img_name}.')
+                best_mrz = self._select_best_mrz_candidate(code, mrz_obj=mrz)
+                if not best_mrz:
+                    return print(f'Error: Unable to build MRZ candidates for image {img_name}.')
 
-                # Strip spaces from MRZ lines — OCR sometimes inserts spurious spaces
-                a = re.sub(r'\s+', '', code[0]).upper()
-                b = re.sub(r'\s+', '', code[1]).upper()
-
-                if len(a) < 44:
-                    a = a + '<' * (44 - len(a))
-                if len(b) < 44:
-                    b = b + '<' * (44 - len(b))
-
-                name, surname = self._parse_name_from_mrz_line(a)
-
-                # Prefer passporteye's highly accurate built-in MRZ parser over manual EasyOCR string splitting
-                mrz_data = mrz.to_dict()
-                if mrz_data.get('names') and mrz_data.get('surname'):
-                    parsed_given = self._normalize_mrz_name_token(mrz_data.get('names'))
-                    parsed_surname = self._normalize_mrz_name_token(mrz_data.get('surname'))
-                    # Keep whichever source looks cleaner: passporteye parsed fields vs OCR MRZ line parse.
-                    if self._mrz_name_quality(parsed_given, parsed_surname) >= self._mrz_name_quality(name, surname):
-                        name, surname = parsed_given, parsed_surname
+                a = best_mrz['line1']
+                b = best_mrz['line2']
+                name = best_mrz['given']
+                surname = best_mrz['surname']
               
                 full_img = cv2.imread(img_name)
+                if debug and full_img is not None:
+                    bbox = self._locate_roi_in_full_image(full_img, mrz_roi)
+                    if bbox:
+                        x, y, w, h = bbox
+                        debug_img = full_img.copy()
+                        cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                        cv2.putText(
+                            debug_img, 'MRZ ROI', (x, max(20, y - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA
+                        )
+                        base, ext = os.path.splitext(img_name)
+                        debug_path = f'{base}_mrz_box{ext if ext else ".png"}'
+                        cv2.imwrite(debug_path, debug_img)
+                        print(f'DEBUG MRZ box saved: {debug_path}')
                 ocr_results = self._ocr_lines(full_img, engine=ocr_engine)
                 ocr_extended = self._rejoin_split_ocr_dates(ocr_results)
 
@@ -767,6 +960,16 @@ class PassportDataExtractor:
                     len(given_from_surname) < len(name) + 2
                 ):
                     name = given_from_surname
+
+                # If chosen name looks like authority text, force stronger fallbacks.
+                if self._is_suspicious_name(name, surname):
+                    mrz_given_fallback, mrz_surname_fallback = self._extract_mrz_name_from_ocr_lines(ocr_results)
+                    if mrz_given_fallback and mrz_surname_fallback:
+                        name, surname = mrz_given_fallback, mrz_surname_fallback
+                    else:
+                        # Final fallback: prefer visual-zone parse if available.
+                        if v_given and v_surname and not self._is_suspicious_name(v_given, v_surname):
+                            name, surname = v_given, v_surname
 
                 user_info['Given Names'] = name if name else 'Not Found'
                 user_info['Surname'] = surname if surname else 'Not Found'
@@ -792,6 +995,8 @@ class PassportDataExtractor:
                     all_tess = self._rejoin_split_ocr_dates(ocr_results)
                     issue_date = self.find_issuing_date(all_tess, dob_str=dob, expiry_str=expiry)
                 if debug:
+                    print('DEBUG MRZ score:', best_mrz.get('score'))
+                    print('DEBUG MRZ checks:', best_mrz.get('details'))
                     print('DEBUG full OCR lines:')
                     for line in ocr_results:
                         print(f'  {line!r}')
