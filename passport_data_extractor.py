@@ -34,7 +34,9 @@ class PassportDataExtractor:
     _NAME_STOPWORDS = {
         'ADMINISTRATION', 'IMMIGRATION', 'NATIONAL', 'REPUBLIC', 'PEOPLE',
         'CHINA', 'PRC', 'AUTHORITY', 'PASSPORT', 'MINISTRY', 'FOREIGN',
-        'OFFICE', 'ISSUE', 'ISSUING', 'BEARER'
+        'OFFICE', 'ISSUE', 'ISSUING', 'BEARER',
+        # Common passport field labels that OCR may mistake as person names.
+        'SURNAME', 'GSURNAME', 'GIVEN', 'NAMES', 'GIVENNAMES', 'SURAME'
     }
 
     def __init__(self, country_codes_file, gpu=True):
@@ -521,6 +523,12 @@ class PassportDataExtractor:
         if not tokens:
             return True
 
+        # Reject known header-like placeholder combinations
+        # e.g. "SURNAME GIVEN NAMES" from label text.
+        token_set = set(tokens)
+        if ('SURNAME' in token_set or 'SURAME' in token_set) and ('GIVEN' in token_set or 'NAMES' in token_set):
+            return True
+
         # Strong OCR-noise indicators: too many single-letter tokens or repeated-letter blobs.
         single_letter_tokens = [t for t in tokens if len(t) == 1]
         repeated_letter_blobs = [t for t in tokens if re.match(r'^([A-Z])\1{2,}$', t)]
@@ -577,7 +585,9 @@ class PassportDataExtractor:
         stopwords = {
             'PEOPLE', 'REPUBLIC', 'CHINA', 'PASSPORT', 'MINISTRY', 'FOREIGN',
             'AFFAIRS', 'REQUESTS', 'AUTHORITIES', 'ALLOW', 'BEARER', 'ASSISTANCE',
-            'DATE', 'BIRTH', 'ISSUE', 'EXPIRY', 'NATIONALITY', 'AUTHORITY'
+            'DATE', 'BIRTH', 'ISSUE', 'EXPIRY', 'NATIONALITY', 'AUTHORITY',
+            # Field labels frequently found near "Name (Surname, Given names)"
+            'SURNAME', 'GSURNAME', 'GIVEN', 'NAMES', 'GIVENNAMES', 'SURAME'
         }
         for line in ocr_lines:
             n = self._normalize_ocr_line(line).upper()

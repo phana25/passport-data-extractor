@@ -209,3 +209,7 @@ The implementation includes additional cleanup to handle frequent OCR month misr
 ```python
 extractor = PassportDataExtractor("data/country_codes.json", gpu=False)
 ```
+## How activate env
+
+### Mac 
+- `source .venv/bin/activate`
