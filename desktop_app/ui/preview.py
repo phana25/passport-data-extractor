@@ -1,6 +1,7 @@
 import os
 import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QTransform
@@ -242,14 +243,17 @@ class UploadPreviewZone(QFrame):
         title: str,
         on_browse: Callable[[], None],
         on_clear: Callable[[], None] | None = None,
+        on_drop: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__()
         self.setObjectName("UploadPreviewZone")
         self.setFrameShape(QFrame.NoFrame)
         self.setMinimumHeight(120)
         self.setMaximumHeight(260)
+        self.setAcceptDrops(True)
         self._on_browse = on_browse
         self._on_clear = on_clear or (lambda: None)
+        self._on_drop = on_drop or (lambda _path: None)
         self._title = title
 
         layout = QVBoxLayout(self)
@@ -262,7 +266,7 @@ class UploadPreviewZone(QFrame):
         empty_layout = QVBoxLayout(empty)
         empty_layout.setAlignment(Qt.AlignCenter)
         empty_layout.setSpacing(12)
-        lbl = QLabel(f"Click to add {title}")
+        lbl = QLabel(f"Click or drag & drop to add {title}")
         lbl.setStyleSheet("color: #94a3b8; font-size: 14px;")
         empty_layout.addWidget(lbl)
         btn = QPushButton("Browse…")
@@ -343,4 +347,35 @@ class UploadPreviewZone(QFrame):
 
     def set_overlay_boxes(self, boxes: list) -> None:
         self._preview.set_overlay_boxes(boxes)
+
+    def _extract_dropped_image_path(self, event) -> str | None:
+        if not event.mimeData().hasUrls():
+            return None
+        for url in event.mimeData().urls():
+            if not url.isLocalFile():
+                continue
+            local_path = url.toLocalFile()
+            if Path(local_path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                return local_path
+        return None
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._extract_dropped_image_path(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if self._extract_dropped_image_path(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        dropped_path = self._extract_dropped_image_path(event)
+        if not dropped_path:
+            event.ignore()
+            return
+        self._on_drop(dropped_path)
+        event.acceptProposedAction()
 

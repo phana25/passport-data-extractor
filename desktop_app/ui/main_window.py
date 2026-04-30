@@ -338,11 +338,13 @@ class MainWindow(QMainWindow):
             "Passport",
             self._pick_passport,
             on_clear=lambda: setattr(self, "_passport_path", None),
+            on_drop=self._set_passport_image,
         )
         self.card_preview = UploadPreviewZone(
             "Employee Card",
             self._pick_card,
             on_clear=lambda: setattr(self, "_card_path", None),
+            on_drop=self._set_card_image,
         )
 
         preview_layout.addWidget(self.passport_preview, 1)
@@ -810,6 +812,9 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._set_passport_image(path)
+
+    def _set_passport_image(self, path: str) -> None:
         self._passport_path = path
         self.passport_preview.set_image(path)
         if hasattr(self, "btn_save_excel"):
@@ -822,6 +827,9 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._set_card_image(path)
+
+    def _set_card_image(self, path: str) -> None:
         self._card_path = path
         self.card_preview.set_image(path)
         if hasattr(self, "btn_save_excel"):
