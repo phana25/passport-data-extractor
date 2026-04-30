@@ -459,10 +459,43 @@ class PassportDataExtractor:
         value = re.sub(r'\b([A-Z])\1{2,}\b$', '', value).strip()
         # Remove trailing single-letter garbage tokens often produced by OCR filler
         # (e.g. "YAOZU K K" -> "YAOZU"). Keep initials only when the whole name is initials.
+        #
+        # Important: for Vietnamese names, a 2-letter given-name part (e.g. "BA")
+        # can sometimes OCR as a single letter ("B"). Dropping a single trailing
+        # token would remove real name parts.
         tokens = [t for t in value.split(' ') if t]
+
+        # Remove tokens that are OCR artifacts like "KKK" (same letter repeated).
+        while tokens and re.match(r'^([A-Z])\1{2,}$', tokens[-1]):
+            tokens.pop()
+
+        # Recover cases where OCR inserts an extra 'K' between name parts.
+        # Example: "VANKBA" (should be "VAN BA").
+        expanded_tokens: list[str] = []
+        for t in tokens:
+            m = re.match(r'^([A-Z]{2,})K([A-Z]{2})$', t)
+            if m:
+                expanded_tokens.extend([m.group(1), m.group(2)])
+            else:
+                expanded_tokens.append(t)
+        tokens = expanded_tokens
+
         if any(len(t) > 1 for t in tokens):
-            while tokens and len(tokens[-1]) == 1:
-                tokens.pop()
+            # Only strip *multiple* trailing single-letter tokens; keep a single
+            # trailing letter as it may be a mis-OCR of a real 2-letter name part.
+            trailing_single_count = 0
+            for t in reversed(tokens):
+                if len(t) == 1:
+                    trailing_single_count += 1
+                else:
+                    break
+            if trailing_single_count >= 2:
+                tokens = tokens[:len(tokens) - trailing_single_count]
+            # If the last token is a common MRZ filler misread (e.g. trailing "K"),
+            # drop it even if it's the only trailing single-letter token.
+            if tokens and tokens[-1] in ('K', 'X') and len(tokens) >= 2:
+                if any(len(t) > 1 for t in tokens[:-1]):
+                    tokens.pop()
         value = ' '.join(tokens).strip()
         return value
 
@@ -486,6 +519,14 @@ class PassportDataExtractor:
 
         tokens = [t for t in re.findall(r'[A-Z]+', full) if t]
         if not tokens:
+            return True
+
+        # Strong OCR-noise indicators: too many single-letter tokens or repeated-letter blobs.
+        single_letter_tokens = [t for t in tokens if len(t) == 1]
+        repeated_letter_blobs = [t for t in tokens if re.match(r'^([A-Z])\1{2,}$', t)]
+        if repeated_letter_blobs:
+            return True
+        if len(single_letter_tokens) >= 2:
             return True
 
         # Names dominated by known document/authority words are invalid.
@@ -573,8 +614,9 @@ class PassportDataExtractor:
     def _extract_given_by_surname_from_visual(self, ocr_lines, surname):
         """
         Find a visual-zone Latin line containing the detected surname and return
-        the token immediately after it as given name.
+        up to two tokens after it as given name.
         Example: "YANG, YAOZU" -> "YAOZU"
+                 "TRINH VAN BA" -> "VAN BA"
         """
         s = self._normalize_mrz_name_token(surname)
         if not s:
@@ -587,12 +629,55 @@ class PassportDataExtractor:
             tokens = [t for t in n.split() if t]
             if not tokens:
                 continue
-            for i, tok in enumerate(tokens[:-1]):
-                if tok == s:
-                    candidate = self._normalize_mrz_name_token(tokens[i + 1])
-                    # Keep only realistic given-name token lengths.
-                    if 2 <= len(candidate) <= 14:
-                        return candidate
+            for i, tok in enumerate(tokens):
+                if tok != s:
+                    continue
+
+                # Often the visual-zone format is either:
+                #   SURNAME, GIVEN
+                #   SURNAME GIVEN1 GIVEN2
+                # We capture the first 1-2 name tokens after the surname, but stop on
+                # single-letter tokens (typically sex/initials) or stopwords.
+                #
+                # However, OCR can split a 2-letter given-name part (e.g. "BA")
+                # into two single letters ("B" "A"). To recover this, we merge two
+                # adjacent single-letter tokens into a single 2-letter chunk.
+                following_chunks = []
+                idx = i + 1
+                while idx < len(tokens) and len(following_chunks) < 2:
+                    nxt = tokens[idx]
+                    idx += 1
+
+                    candidate = self._normalize_mrz_name_token(nxt)
+                    if not candidate:
+                        continue
+                    if candidate in self._NAME_STOPWORDS:
+                        break
+                    if len(candidate) > 14:
+                        break
+
+                    if len(candidate) == 1:
+                        # Likely sex/initials: stop only when we haven't collected
+                        # anything yet (avoid swallowing the real given-name part).
+                        if candidate in ('M', 'F') or not following_chunks:
+                            break
+
+                        # Try merge with the next token if it's also a single letter.
+                        if idx < len(tokens):
+                            next_candidate = self._normalize_mrz_name_token(tokens[idx])
+                            if next_candidate and len(next_candidate) == 1 and next_candidate not in ('M', 'F'):
+                                idx += 1
+                                following_chunks.append(candidate + next_candidate)
+                                continue
+
+                        # Otherwise keep the single-letter chunk as-is.
+                        following_chunks.append(candidate)
+                        continue
+
+                    following_chunks.append(candidate)
+
+                if following_chunks:
+                    return ' '.join(following_chunks).strip()
         return ''
 
     def _extract_mrz_name_from_ocr_lines(self, ocr_lines):
@@ -957,7 +1042,7 @@ class PassportDataExtractor:
                 if given_from_surname and (
                     not name or
                     name == 'Not Found' or
-                    len(given_from_surname) < len(name) + 2
+                    self._mrz_name_quality(given_from_surname, surname) > self._mrz_name_quality(name, surname)
                 ):
                     name = given_from_surname
 
