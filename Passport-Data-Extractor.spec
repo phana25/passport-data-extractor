@@ -10,6 +10,22 @@ datas += copy_metadata('imageio')
 tmp_ret = collect_all('torch')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# Bundle MRZScanner (DocsaidLab) with its ONNX models
+tmp_ret = collect_all('mrzscanner')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+# Bundle DocAligner (DocsaidLab) with its ONNX model
+tmp_ret = collect_all('docaligner')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+# Bundle capybara — shared DocsaidLab ONNX inference runtime
+tmp_ret = collect_all('capybara')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+# Bundle fastmrz MRZ parser
+tmp_ret = collect_all('fastmrz')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
 # Bundle local Tesseract runtime (no system install needed on target machine).
 vendor_tesseract = Path("vendor") / "tesseract"
 if vendor_tesseract.exists():

@@ -5,3 +5,7 @@ opencv-python
 python-dateutil
 PySide6
 certifi
+pytesseract
+mrzscanner-docsaid
+docaligner-docsaid
+fastmrz
