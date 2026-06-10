@@ -2,10 +2,12 @@ import os
 import ssl
 import sys
 import re
-
+import logging
 import json
 import tempfile
 import warnings
+
+logger = logging.getLogger(__name__)
 
 import cv2
 import easyocr
@@ -593,12 +595,12 @@ class PassportDataExtractor(OCRMixin, MRZMixin, FieldExtractorMixin, ExcelMixin)
                     user_info.update(card_data)
 
             else:
-                print(f'Machine cannot read MRZ from image {img_name}. Trying OCR fallback…')
+                logger.warning(f'Machine cannot read MRZ from image {img_name}. Trying OCR fallback…')
                 fallback = self._get_data_from_ocr_fallback(img_name, ocr_engine=ocr_engine, debug=debug)
                 if fallback:
                     user_info.update(fallback)
                 else:
-                    print(f'OCR fallback also failed for {img_name}.')
+                    logger.warning(f'OCR fallback also failed for {img_name}.')
 
         finally:
             if os.path.exists(tmpfile_path):
