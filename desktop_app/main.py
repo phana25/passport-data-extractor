@@ -1,5 +1,7 @@
 import sys
+import os
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
@@ -38,15 +40,22 @@ class _TelegramHandler(logging.Handler):
 
 def _setup_logging() -> Path:
     if getattr(sys, "frozen", False):
-        log_dir = Path(sys.executable).resolve().parent / "logs"
+        local_app_data = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+        log_dir = local_app_data / "Passport Data Extractor" / "logs"
     else:
         log_dir = Path(__file__).resolve().parents[1] / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "app.log"
 
+    root = logging.getLogger()
+    if root.handlers:
+        return log_file
+
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=2_000_000, backupCount=3, encoding="utf-8"
+    )
     file_handler.setFormatter(fmt)
 
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -56,7 +65,6 @@ def _setup_logging() -> Path:
     telegram_handler.setLevel(logging.WARNING)
     telegram_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
 
-    root = logging.getLogger()
     root.setLevel(logging.WARNING)
     root.addHandler(file_handler)
     root.addHandler(stream_handler)
@@ -70,6 +78,9 @@ def main() -> int:
     logger = logging.getLogger("main")
 
     def handle_exception(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
         logger.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
     sys.excepthook = handle_exception
 

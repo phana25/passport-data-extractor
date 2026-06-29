@@ -26,6 +26,15 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('fastmrz')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# Bundle onnxruntime (needed by capybara/mrzscanner on Windows)
+tmp_ret = collect_all('onnxruntime')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+# Bundle turbojpeg.dll (needed by capybara on Windows — libjpeg-turbo)
+_turbojpeg_dll = 'C:/libjpeg-turbo64/bin/turbojpeg.dll'
+if Path(_turbojpeg_dll).exists():
+    binaries.append((_turbojpeg_dll, '.'))
+
 # Bundle local Tesseract runtime (no system install needed on target machine).
 vendor_tesseract = Path("vendor") / "tesseract"
 if vendor_tesseract.exists():
@@ -44,7 +53,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['rthooks/pyi_rth_turbojpeg.py'],
     excludes=[],
     noarchive=False,
     optimize=0,
