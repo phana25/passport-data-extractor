@@ -6,6 +6,7 @@ import logging
 import json
 import tempfile
 import warnings
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,24 @@ class PassportDataExtractor(OCRMixin, MRZMixin, FieldExtractorMixin, ExcelMixin)
         with open(country_codes_file) as f:
             self.country_codes = json.load(f)
 
+        if _REQUESTS_AVAILABLE:
+            self._start_cloud_keepalive()
+
+    def _start_cloud_keepalive(self):
+        """Ping the cloud API immediately on startup and every 10 minutes to prevent HF Space from sleeping."""
+        health_url = _CLOUD_API_URL.replace("/scan", "/health")
+
+        def ping():
+            while True:
+                try:
+                    _requests.get(health_url, timeout=5)
+                except Exception:
+                    pass
+                threading.Event().wait(600)
+
+        t = threading.Thread(target=ping, daemon=True)
+        t.start()
+
     def _align_document(self, img):
         """Use DocAligner to perspective-correct a document image.
 
@@ -200,7 +219,7 @@ class PassportDataExtractor(OCRMixin, MRZMixin, FieldExtractorMixin, ExcelMixin)
                 response = _requests.post(
                     _CLOUD_API_URL,
                     files={"file": f},
-                    timeout=30,
+                    timeout=10,
                 )
             if response.status_code == 200:
                 return response.json().get("mrz_texts") or []
