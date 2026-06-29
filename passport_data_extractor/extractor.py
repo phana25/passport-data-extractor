@@ -38,6 +38,14 @@ except ImportError:
     _FASTMRZ_AVAILABLE = False
     _FastMRZ = None
 
+try:
+    import requests as _requests
+    _REQUESTS_AVAILABLE = True
+except ImportError:
+    _REQUESTS_AVAILABLE = False
+
+_CLOUD_API_URL = "https://phana25-mrz-scanner-api.hf.space/scan"
+
 warnings.filterwarnings('ignore')
 
 from ._ocr_utils import OCRMixin
@@ -182,6 +190,23 @@ class PassportDataExtractor(OCRMixin, MRZMixin, FieldExtractorMixin, ExcelMixin)
             return lines, polygon
         except Exception:
             return [], None
+
+    def _scan_mrz_cloud(self, img_path):
+        """Send image to the cloud MRZScanner API as fallback when local scan is weak."""
+        if not _REQUESTS_AVAILABLE:
+            return []
+        try:
+            with open(img_path, 'rb') as f:
+                response = _requests.post(
+                    _CLOUD_API_URL,
+                    files={"file": f},
+                    timeout=30,
+                )
+            if response.status_code == 200:
+                return response.json().get("mrz_texts") or []
+        except Exception:
+            pass
+        return []
 
     def clean(self, string):
         return ''.join(char for char in string if char.isalnum()).upper()
@@ -418,14 +443,25 @@ class PassportDataExtractor(OCRMixin, MRZMixin, FieldExtractorMixin, ExcelMixin)
             if debug and dl_lines:
                 print(f'DEBUG MRZScanner (DL) lines: {dl_lines}')
 
-            # --- Always also try passporteye for ROI-based reading ---
-            # Running both sources gives the score-based selector more candidates to work
-            # with — critical when MRZScanner returns garbage for a readable passport.
+            # Run passporteye only when MRZScanner did not return at least 2 good lines.
+            # When DL succeeds, skipping passporteye saves several seconds on slow CPUs.
+            dl_good = len(dl_lines) >= 2 and any('<<' in l for l in dl_lines)
+
+            # If local DL failed, try the cloud API before falling back to passporteye.
+            if not dl_good:
+                cloud_lines = self._scan_mrz_cloud(img_name)
+                if debug and cloud_lines:
+                    print(f'DEBUG Cloud MRZ lines: {cloud_lines}')
+                if len(cloud_lines) >= 2 and any('<<' in l for l in cloud_lines):
+                    dl_lines = cloud_lines
+                    dl_good = True
+
             mrz = None
-            try:
-                mrz = read_mrz(img_name, save_roi=True)
-            except (pytesseract.pytesseract.TesseractNotFoundError, FileNotFoundError, OSError):
-                self._tesseract_available = False
+            if not dl_good:
+                try:
+                    mrz = read_mrz(img_name, save_roi=True)
+                except (pytesseract.pytesseract.TesseractNotFoundError, FileNotFoundError, OSError):
+                    self._tesseract_available = False
 
             if dl_lines or mrz:
                 # Build the initial code list by pooling lines from both sources.
