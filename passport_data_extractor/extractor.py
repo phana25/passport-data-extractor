@@ -438,23 +438,23 @@ class PassportDataExtractor(OCRMixin, MRZMixin, FieldExtractorMixin, ExcelMixin)
             tmpfile_path = tmpfile.name
 
         try:
-            # --- Primary: MRZScanner (deep learning) ---
-            dl_lines, dl_polygon = self._scan_mrz_with_docsaid(img_name)
-            if debug and dl_lines:
-                print(f'DEBUG MRZScanner (DL) lines: {dl_lines}')
+            # --- Primary: Cloud API ---
+            cloud_lines = self._scan_mrz_cloud(img_name)
+            if debug and cloud_lines:
+                print(f'DEBUG Cloud MRZ lines: {cloud_lines}')
+            cloud_good = len(cloud_lines) >= 2 and any('<<' in l for l in cloud_lines)
 
-            # Run passporteye only when MRZScanner did not return at least 2 good lines.
-            # When DL succeeds, skipping passporteye saves several seconds on slow CPUs.
+            # If cloud succeeded, skip local MRZScanner entirely.
+            if cloud_good:
+                dl_lines = cloud_lines
+                dl_polygon = None
+            else:
+                # --- Fallback: local MRZScanner (deep learning) ---
+                dl_lines, dl_polygon = self._scan_mrz_with_docsaid(img_name)
+                if debug and dl_lines:
+                    print(f'DEBUG MRZScanner (DL) lines: {dl_lines}')
+
             dl_good = len(dl_lines) >= 2 and any('<<' in l for l in dl_lines)
-
-            # If local DL failed, try the cloud API before falling back to passporteye.
-            if not dl_good:
-                cloud_lines = self._scan_mrz_cloud(img_name)
-                if debug and cloud_lines:
-                    print(f'DEBUG Cloud MRZ lines: {cloud_lines}')
-                if len(cloud_lines) >= 2 and any('<<' in l for l in cloud_lines):
-                    dl_lines = cloud_lines
-                    dl_good = True
 
             mrz = None
             if not dl_good:
